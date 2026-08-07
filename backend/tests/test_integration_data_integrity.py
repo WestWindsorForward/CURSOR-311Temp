@@ -32,7 +32,7 @@ NOW = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
 def tasks():
     """The sync tasks module. Needs the ORM and Celery, which CI does not have."""
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("celery")
+    pytest.importorskip("celery.app")
     import app.tasks.integrations as module
     return module
 
@@ -65,6 +65,7 @@ def test_documents_pushed_count_is_in_a_migration_not_only_in_init_db():
 
 def test_the_model_and_the_migrations_agree_on_the_integration_link_columns():
     pytest.importorskip("sqlalchemy")
+    pytest.importorskip("geoalchemy2.types")   # app.models declares Geometry columns
     from app.models import IntegrationLink
 
     columns = {c.name for c in IntegrationLink.__table__.columns}
@@ -311,7 +312,7 @@ def test_deleting_clears_the_database_copy_too():
     ("config_fields", "agency_name"),
 ])
 def test_declared_fields_are_accepted(field_list, key):
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from app.api.integrations import _allowed_keys, _reject_unknown_keys
 
     assert key in _allowed_keys("accela", field_list)
@@ -326,7 +327,7 @@ def test_an_undeclared_credential_field_cannot_name_a_vault_key():
     """`credentials` keys become Secret Manager key names
     (INTEGRATION_<PLATFORM>_<FIELD>), so an unvalidated dict let an admin write
     arbitrary entries into the namespace the platform itself reads from."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from fastapi import HTTPException
 
     from app.api.integrations import _reject_unknown_keys
@@ -340,7 +341,7 @@ def test_an_undeclared_credential_field_cannot_name_a_vault_key():
 def test_an_undeclared_setting_is_refused_rather_than_silently_ignored():
     """Config is a JSON blob the connectors read by key, so an unrecognised key
     is a setting the admin believes they set and nothing will ever read."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from fastapi import HTTPException
 
     from app.api.integrations import _reject_unknown_keys
@@ -352,7 +353,7 @@ def test_an_undeclared_setting_is_refused_rather_than_silently_ignored():
 def test_the_per_vendor_mapping_keys_the_connectors_read_are_still_accepted():
     """These are real settings an integrator sets deliberately; they are just
     not wizard fields. Rejecting them would break a working install."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from app.api.integrations import _reject_unknown_keys
 
     _reject_unknown_keys("generic_rest", None, {
@@ -365,7 +366,7 @@ def test_vaulted_is_all_or_nothing_not_any():
     """A vault write that failed for one field falls back to keeping that value
     encrypted in this database. `any` reported the whole set as vaulted on the
     strength of the fields that succeeded -- a trust signal rounding up."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from app.api.integrations import _vaulted_state
 
     assert _vaulted_state({}) == "none"

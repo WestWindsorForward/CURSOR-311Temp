@@ -8,7 +8,16 @@ import importlib
 
 import pytest
 
-pytest.importorskip("sqlalchemy")  # health.py imports the DB stack
+# classify_health is pure policy, but it lives in a router module, so importing
+# it drags in the whole web stack. Each of these has to be named: sqlalchemy
+# alone was guarded here before, and the file went from "skipped in CI" to
+# "collection error in CI" the day health.py grew its `from fastapi import` --
+# a collection error makes pytest exit 2, which reads as a broken run rather
+# than a missing dependency. Skip on the specific third-party imports, so a
+# genuine breakage of health.py still surfaces as an error in the full image.
+pytest.importorskip("fastapi.routing")           # the router decorators
+pytest.importorskip("sqlalchemy")        # health.py queries the DB directly
+pytest.importorskip("geoalchemy2.types")       # via app.models -> Geometry columns
 
 health = importlib.import_module("app.api.health")
 

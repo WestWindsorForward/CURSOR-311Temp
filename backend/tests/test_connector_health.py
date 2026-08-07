@@ -171,6 +171,10 @@ def test_a_normal_error_passes_through_readable():
 async def test_a_success_detail_is_scrubbed_before_it_is_stored():
     """record_success stores what the check found, and what a check found is a
     vendor string like any other -- same column, same cards, same emails."""
+    # record_success never raises -- it logs and swallows. Without the ORM stack
+    # it therefore "succeeds" having written nothing, so this has to skip rather
+    # than assert against a row the code never touched.
+    pytest.importorskip("geoalchemy2.types")   # via app.models -> ConnectorHealth
     stored = Row()
 
     class Result:
@@ -272,7 +276,7 @@ def test_a_success_goes_stale_within_a_few_sweeps():
 
 def test_the_sweep_really_does_run_daily():
     """The bound above is only meaningful if the schedule is what it claims."""
-    pytest.importorskip("celery")
+    pytest.importorskip("celery.app")
     from app.core.celery_app import celery_app
 
     entry = celery_app.conf.beat_schedule["daily-connector-check"]
