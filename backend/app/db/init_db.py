@@ -181,6 +181,13 @@ async def _run_schema_migrations():
         # default to public, preserving current behavior.
         "ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true",
         "CREATE INDEX IF NOT EXISTS ix_service_requests_is_public ON service_requests (is_public)",
+        # Staff-controlled archival from the public tracker and map (added
+        # 2026-08-07). Nothing is archived until staff say so, and the town-wide
+        # policy stays unset until an admin picks a number, so both are no-ops
+        # on an existing install.
+        "ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS public_archived BOOLEAN NOT NULL DEFAULT false",
+        "CREATE INDEX IF NOT EXISTS ix_service_requests_public_archived ON service_requests (public_archived)",
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_archive_days INTEGER",
         # GovTech integrations: comment/document sync tracking (added 2026-07-01)
         "ALTER TABLE request_comments ADD COLUMN IF NOT EXISTS external_ref VARCHAR(200)",
         "CREATE INDEX IF NOT EXISTS ix_request_comments_external_ref ON request_comments (external_ref)",

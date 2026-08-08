@@ -65,7 +65,16 @@
 		# Enterprise locator lives on its own hostname: that is unknowable here,
 		# and such a town still geocodes correctly server-side through
 		# geocode_dispatch, which no browser policy applies to.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://maps.googleapis.com https://*.gstatic.com https://translate.googleapis.com https://cdn.jsdelivr.net https://js.arcgis.com https://atlas.microsoft.com https://cdn.apple-mapkit.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://js.arcgis.com https://atlas.microsoft.com; font-src 'self' https://fonts.gstatic.com https://js.arcgis.com https://atlas.microsoft.com data:; img-src 'self' data: blob: https: http:; connect-src 'self' https://maps.googleapis.com https://places.googleapis.com https://*.googleapis.com https://*.gstatic.com https://translate.googleapis.com https://api.open-meteo.com https://archive-api.open-meteo.com https://*.auth0.com https://fonts.googleapis.com https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com https://atlas.microsoft.com https://cdn.apple-mapkit.com https://*.apple-mapkit.com wss:; frame-src 'self' https://www.google.com https://*.auth0.com; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self' blob: https://js.arcgis.com https://atlas.microsoft.com;"
+		#
+		# frame-src also carries Microsoft Forms, for the deployment
+		# registration form an operator may host there (CONTACT_FORM_URL). The
+		# console shows that form in a frame so a clerk can answer it without
+		# leaving the page, and without this the frame is refused and renders as
+		# a blank rectangle -- which looks like a broken console rather than a
+		# policy decision. A form hosted anywhere else needs its own host added
+		# here; setting CONTACT_FORM_EMBED=false is the alternative, and sends
+		# people to a new tab instead.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://maps.googleapis.com https://*.gstatic.com https://translate.googleapis.com https://cdn.jsdelivr.net https://js.arcgis.com https://atlas.microsoft.com https://cdn.apple-mapkit.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://js.arcgis.com https://atlas.microsoft.com; font-src 'self' https://fonts.gstatic.com https://js.arcgis.com https://atlas.microsoft.com data:; img-src 'self' data: blob: https: http:; connect-src 'self' https://maps.googleapis.com https://places.googleapis.com https://*.googleapis.com https://*.gstatic.com https://translate.googleapis.com https://api.open-meteo.com https://archive-api.open-meteo.com https://*.auth0.com https://fonts.googleapis.com https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com https://atlas.microsoft.com https://cdn.apple-mapkit.com https://*.apple-mapkit.com wss:; frame-src 'self' https://www.google.com https://*.auth0.com https://forms.office.com https://forms.microsoft.com; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self' blob: https://js.arcgis.com https://atlas.microsoft.com;"
 	}
 }
 

@@ -17,7 +17,7 @@ Preference keys (on User.notification_preferences JSON):
     email_assigned_only                                         (default False)
 """
 
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 _EMAIL_KEY = {
     "new_requests": "email_new_requests",
@@ -46,6 +46,28 @@ def wants_event_sms(prefs: Optional[dict], event: str) -> bool:
     if not key:
         return False
     return bool((prefs or {}).get(key, False))
+
+
+def pick_recipient_group(
+    assignee,
+    department_staff: Sequence,
+    admins: Sequence,
+) -> List:
+    """Who a request event goes to: the first non-empty tier wins.
+
+    Tier order: the specifically-assigned person; else the routed department's
+    staff; else the town's active admins. The admin tier exists because small
+    towns routinely have no department memberships at all (the demo site is one
+    admin, zero memberships) — without it, every "notify staff" preference is
+    dead letter: recipients resolve to nobody and the toggles are never even
+    consulted. Per-user preference filtering (should_notify_staff) still runs
+    on whichever tier is chosen; this only decides who is *considered*.
+    """
+    if assignee is not None:
+        return [assignee]
+    if department_staff:
+        return list(department_staff)
+    return list(admins)
 
 
 def should_notify_staff(

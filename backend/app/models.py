@@ -257,7 +257,19 @@ class ServiceRequest(Base):
     #          viewable by anyone holding the direct tracking link, and always
     #          visible to town staff. Never means "hidden from staff".
     is_public = Column(Boolean, default=True, server_default='true', nullable=False, index=True)
-    
+
+    # Staff's decision to take this report off the public tracker and map, so a
+    # town's public listing does not become a decade of closed potholes.
+    #   False (default) - listed, subject to is_public and the town's policy
+    #   True  - excluded from public listings. Still reachable by its tracking
+    #           link, still fully visible to staff, still in research exports.
+    #
+    # Deliberately NOT `is_public`. That column records what the RESIDENT asked
+    # for, and staff overwriting it would both lose the resident's answer and
+    # make "unarchive" republish a report somebody had asked to keep unlisted.
+    # Two decisions, two columns, and the public listing requires both.
+    public_archived = Column(Boolean, default=False, server_default='false', nullable=False, index=True)
+
     # AI Analysis
     ai_analysis = Column(JSON)
     flagged = Column(Boolean, default=False, server_default='false', nullable=False)
@@ -338,7 +350,8 @@ class RequestAuditLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     service_request_id = Column(Integer, ForeignKey("service_requests.id"), nullable=False, index=True)
     
-    # Action type: submitted, status_change, department_assigned, staff_assigned, comment_added
+    # Action type: submitted, status_change, department_assigned, staff_assigned,
+    # comment_added, legal_hold, public_archive
     action = Column(String(50), nullable=False)
     
     # What changed
@@ -555,6 +568,16 @@ class SystemSettings(Base):
     # attached to a claim and this does not.
     retention_days = Column(Integer)
     retention_mode = Column(String(20), default="redact")  # "redact" or "purge"
+
+    # How many days a CLOSED report stays on the public tracker and map. This is
+    # decluttering, not retention and not privacy: nothing is deleted, redacted
+    # or hidden from staff, the tracking link keeps working, and research
+    # exports still include the report. NULL or 0 means everything stays listed.
+    #
+    # Applied at query time (app/services/public_visibility.py), never stamped
+    # onto rows, so changing the number is instantly retroactive in both
+    # directions and clearing it puts the whole history back.
+    public_archive_days = Column(Integer)
     # Which fields a retention run clears. NULL means never configured, and
     # that is all it means: there is no list we can supply on a town's behalf,
     # because the list is what is permanently destroyed.

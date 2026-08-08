@@ -28,6 +28,13 @@ The application makes no automatic calls to Pinpoint 311 servers. Because it is 
 
 The implementation is `frontend/src/components/StayInformed.tsx`, which carries the same account of what it does and does not send.
 
+A deployment may instead set `CONTACT_FORM_URL` to a registration form the operator hosts (a Microsoft Form, in practice). When it is unset — the default — the built-in form above is used unchanged. When it is set:
+
+- **The console shows the operator's form rather than its own**, either framed inside the page (the default) or opened in a new tab if `CONTACT_FORM_EMBED=false`. It is labelled as hosted by Microsoft Forms in both cases. The application server transmits nothing either way; the traffic is between the administrator's browser and Microsoft.
+- **The form is fetched only after somebody asks for it.** A framed third-party form is a request to Microsoft the moment it is rendered, so rendering it requires a click on a button that says so. The automatic first-run prompt shows an invitation and no frame, and dismissing it contacts nobody. Opening the form is the disclosed request; submitting it sends the answers to Microsoft Forms, where the operator reads them.
+- **Pre-filled answers travel in the form's URL, and the operator chooses which.** `CONTACT_FORM_URL` may contain `{organization}`, `{deployment_url}`, `{version}`, `{contact_name}`, `{contact_email}` and `{contact_role}` placeholders, which the console substitutes. A placeholder that is not in the URL is a value that is never sent. `{contact_name}`, `{contact_email}` and `{contact_role}` are the signed-in administrator's own details — personal data — and are therefore opt-in by the same mechanism: they are transmitted only if the operator deliberately put them in the URL. Whatever is pre-filled is visible and editable in the form before it is submitted.
+- **The frame is given no more than it needs.** It runs under a `sandbox` allowing only scripts, its own storage, form submission and pop-ups, and is sent with `referrer-policy: no-referrer` so the address of the town's console — often an internal hostname — is not disclosed to Microsoft. A link to open the form in a new tab is always offered alongside the frame, because a browser that blocks third-party storage will not render it.
+
 ### Audit Logging
 - **Comprehensive trail**: every lifecycle event is recorded in the `request_audit_logs` table (submission, assignment, status changes, comments, edits).
 - **Tamper-evident, not immutable**: entries are hash-chained, and the chain head is anchored on a schedule. The data lives in a normal database table — the chaining lets tampering be *detected*, it does not make the records physically immutable.

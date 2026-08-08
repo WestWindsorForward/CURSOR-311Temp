@@ -838,6 +838,10 @@ export default function AdminConsole() {
      * Instructions; what is left here has no provider, no credentials and
      * nothing to switch off at the dispatch layer. */
     const [modules, setModules] = useState({ research_portal: false, unlisted_reports: false });
+    // Town-wide public archival policy, as typed. Held as a string because the
+    // input is a text field and "" is a meaningful value: it is how an admin
+    // clears the policy, and the server reads "" and 0 as "keep everything".
+    const [publicArchiveDays, setPublicArchiveDays] = useState<string>('');
     // Research pack switches: catalog (labels, field lists) from the server so
     // the "contains:" disclosure can never disagree with the export, plus the
     // editable on/off state saved alongside `modules`.
@@ -1032,6 +1036,7 @@ export default function AdminConsole() {
                 research_portal: settings.modules?.research_portal || false,
                 unlisted_reports: settings.modules?.unlisted_reports ?? (settings.modules as any)?.private_reports ?? false,
             });
+            setPublicArchiveDays(settings.public_archive_days ? String(settings.public_archive_days) : '');
         }
     }, [settings]);
 
@@ -1485,6 +1490,11 @@ export default function AdminConsole() {
             // the server's "leave them as they are".
             const payload: Record<string, unknown> = { modules };
             if (Object.keys(packSwitches).length > 0) payload.research_packs = packSwitches;
+            // Always sent, including as '' -- unlike the pack switches, an empty
+            // box here is a deliberate answer ("keep everything listed") and not
+            // a fetch that has yet to resolve. The server normalises '' and 0
+            // to "no policy".
+            payload.public_archive_days = publicArchiveDays === '' ? null : Number(publicArchiveDays);
             await api.updateSettings(payload);
             await refreshSettings();
             setSaveMessage('Modules saved successfully');
@@ -1518,6 +1528,18 @@ export default function AdminConsole() {
                 ready={Boolean(settings?.township_name)
                     && settings?.township_name !== 'Your Municipality'
                     && currentTab !== 'integration'}
+                /* What the console already knows, so a registration form does
+                 * not ask for it again. Which of these actually travel is the
+                 * operator's choice, made by which {tokens} their
+                 * CONTACT_FORM_URL contains -- the two personal ones below go
+                 * nowhere unless they asked for them by name. See
+                 * components/contactForm.ts. */
+                prefill={{
+                    organization: settings?.township_name,
+                    contact_name: user?.full_name,
+                    contact_email: user?.email,
+                    contact_role: user?.role,
+                }}
             />
 
             {/* Mobile sidebar backdrop */}
@@ -2553,6 +2575,47 @@ export default function AdminConsole() {
                                                 </motion.div>
                                             );
                                         })}
+                                    </div>
+                                </div>
+
+                                {/* Public tracker housekeeping. Sits under the modules it
+                                    reads like, and saves with the same button. */}
+                                <div className="rounded-2xl bg-white/[0.03] backdrop-blur-xl border border-white/10 overflow-hidden shadow-2xl">
+                                    <div className="px-5 sm:px-6 py-4 border-b border-white/10 bg-gradient-to-r from-white/[0.05] to-transparent">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-slate-500/20 to-slate-600/10 border border-slate-500/20 flex items-center justify-center">
+                                                <EyeOff className="w-4 h-4 text-slate-300" />
+                                            </div>
+                                            <div>
+                                                <h2 className="text-sm font-semibold text-white">Public Tracker Archival</h2>
+                                                <p className="text-xs text-white/40">Keep the public map and tracker readable as the years add up</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="px-5 sm:px-6 py-5">
+                                        <label className="block text-sm font-medium text-white/70 mb-2" htmlFor="public-archive-days">
+                                            Remove closed reports after (days)
+                                        </label>
+                                        <input
+                                            id="public-archive-days"
+                                            type="number"
+                                            value={publicArchiveDays}
+                                            onChange={(e) => setPublicArchiveDays(e.target.value)}
+                                            placeholder="e.g. 180"
+                                            min="1"
+                                            max="36500"
+                                            className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-primary-500/50 placeholder:text-white/40"
+                                            aria-describedby="public-archive-days-help"
+                                        />
+                                        <p id="public-archive-days-help" className="text-white/50 text-xs mt-2">
+                                            Remove closed reports from the public tracker and map after N days. They stay available by direct link and to staff. Leave empty to keep everything listed.
+                                        </p>
+                                        <p className="text-white/40 text-xs mt-2">
+                                            {publicArchiveDays && Number(publicArchiveDays) > 0
+                                                ? `Closed reports drop off the public tracker and map ${publicArchiveDays} days after they are closed. Nothing is deleted, staff keep seeing everything, tracking links keep working, and research exports still include them \u2014 raise or clear this number and the reports come straight back.`
+                                                : 'Not set \u2014 every report a resident has not chosen to unlist stays on the public tracker and map.'}
+                                        </p>
                                     </div>
                                 </div>
                             </div>

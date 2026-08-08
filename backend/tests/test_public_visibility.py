@@ -21,7 +21,8 @@ from app.models import ServiceRequest
 
 
 def _public_sql() -> str:
-    q = select(ServiceRequest).where(*open311.public_visibility_filters())
+    from app.services.public_visibility import publicly_listed_conditions
+    q = select(ServiceRequest).where(*publicly_listed_conditions())
     return str(q.compile(compile_kwargs={"literal_binds": True})).lower()
 
 

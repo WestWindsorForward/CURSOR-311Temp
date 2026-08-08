@@ -221,6 +221,16 @@ class ServiceRequestUpdate(BaseModel):
     flagged: Optional[bool] = None
 
 
+class PublicArchiveUpdate(BaseModel):
+    """Staff toggling one report off (or back onto) the public tracker and map.
+
+    Its own endpoint rather than a field on ServiceRequestUpdate: this is not a
+    change to the report, it is a change to where the report is listed, and
+    keeping it separate means a bulk status edit can never carry it along.
+    """
+    public_archived: bool
+
+
 class ServiceRequestDelete(BaseModel):
     """Schema for soft-deleting a service request with justification"""
     justification: str = Field(..., min_length=10, description="Reason for deleting this request")
@@ -243,11 +253,19 @@ class ServiceRequestResponse(BaseModel):
     flagged: bool = False
     # Whether this report appears in public listings (False = unlisted).
     is_public: bool = True
+    # Whether staff took it off the public tracker and map. Distinct from
+    # is_public, which is the resident's own choice — see models.ServiceRequest.
+    public_archived: bool = False
 
     @field_validator('is_public', mode='before')
     @classmethod
     def coalesce_is_public(cls, v):
         return True if v is None else v
+
+    @field_validator('public_archived', mode='before')
+    @classmethod
+    def coalesce_public_archived(cls, v):
+        return False if v is None else v
 
     @field_validator('flagged', mode='before')
     @classmethod
@@ -379,6 +397,33 @@ class SystemSettingsBase(BaseModel):
     privacy_policy: Optional[str] = None  # Custom privacy policy (Markdown)
     terms_of_service: Optional[str] = None  # Custom terms of service (Markdown)
     accessibility_statement: Optional[str] = None  # Custom accessibility statement
+    # Days a CLOSED report stays on the public tracker and map. None or 0 means
+    # everything stays listed. Optional so exclude_unset keeps a settings save
+    # that never mentions it from clearing a configured policy.
+    public_archive_days: Optional[int] = None
+
+    @field_validator('public_archive_days', mode='before')
+    @classmethod
+    def normalize_public_archive_days(cls, v):
+        """0, "" and None all mean "no policy", and all store as NULL.
+
+        The admin field is a text input, so an admin clearing it sends "". One
+        stored representation of "unset" keeps `archive_cutoff` from having to
+        know about three of them.
+        """
+        if v is None or v == "":
+            return None
+        try:
+            days = int(v)
+        except (TypeError, ValueError):
+            raise ValueError("Days must be a whole number, or empty to keep everything listed.")
+        if days == 0:
+            return None
+        if days < 1:
+            raise ValueError("Days must be at least 1, or empty to keep everything listed.")
+        if days > 36500:
+            raise ValueError("Days must be 36,500 (100 years) or less.")
+        return days
 
 
 class SystemSettingsResponse(SystemSettingsBase):

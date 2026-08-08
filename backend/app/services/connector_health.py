@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -258,6 +259,13 @@ def _is_real_session(db) -> bool:
 async def _recording_session(db):
     """A session to write one health row in, preferring one of our own.
 
+    `db=None` means the caller has no session at all -- the runtime quota flags
+    (`note_quota_failure`) fire from places like the translation cache path and
+    the photo-redaction detectors, which deliberately never hold one. Opening
+    our own is the same isolation argument as below, just without a caller
+    session to protect; if SessionLocal itself cannot be imported the ImportError
+    propagates into record_*'s own catch and costs one data point, as designed.
+
     These functions commit, and they are called from inside per-integration
     loops -- through `guard`, on every push. Committing the *caller's* session
     there flushed work that iteration had only half applied: in
@@ -270,6 +278,17 @@ async def _recording_session(db):
     Falls back to the caller's session when there is no real one to replace --
     which is every test in this suite, and any caller passing a stand-in.
     """
+    if db is None:
+        from app.db.session import SessionLocal
+        session = SessionLocal()
+        try:
+            yield session
+        finally:
+            try:
+                await session.close()
+            except Exception:
+                pass
+        return
     if not _is_real_session(db):
         yield db
         return
@@ -469,3 +488,123 @@ def worst_first(healths: List[Health]) -> List[Health]:
     """
     rank = {DOWN: 0, FAILING: 1, STALE: 2, UNKNOWN: 3, WORKING: 4}
     return sorted(healths, key=lambda h: (rank.get(h.status, 9), h.connector))
+
+
+# ---------------------------------------------------------------------------
+# Quota failures observed at runtime.
+#
+# Every runtime consumer of a metered provider already degrades gracefully --
+# geocoding falls through to OpenStreetMap, redaction falls back to the
+# on-server detector, translation returns the originals, AI triage stores a
+# manual-review default. The degradation is the feature; the problem was that
+# it is *silent*, so a town could run against its hard rate limit for a month
+# and only notice on the invoice, or in translation quality nobody reports.
+#
+# These helpers put that event where an administrator already looks: the same
+# connector_health row the spotlight cards and the daily alert digest read.
+# Residents and staff see nothing new -- the fallback already covered them.
+# ---------------------------------------------------------------------------
+
+# The words providers use for "you have hit your limit". Matched against the
+# scrubbed message, because httpx bakes the request URL into every status-error
+# string and a query string can legitimately contain "429 Elm St".
+#
+# Deliberately *not* matched: a bare "quota". Google auth errors say things
+# like "quota project not set", which is a configuration problem, not a limit
+# being hit, and flagging it here would page an administrator with the wrong
+# story.
+_QUOTA_TEXT = re.compile(
+    r"(?i)(\b429\b|too ?many ?requests|rate.?limit|rate exceeded|throttl|"
+    r"over[_ ]?query[_ ]?limit|resource[_ ]exhausted|over quota|"
+    r"quota (?:exceeded|exhausted|reached)|exceeded.{0,40}quota|"
+    r"insufficient[_ ]quota|out of quota|dailylimitexceeded)"
+)
+
+
+def _http_status_of(error: Any) -> Optional[int]:
+    """The HTTP status an exception carries, if it carries one at all.
+
+    Covers httpx.HTTPStatusError (`.response.status_code`), aiohttp and raw
+    response objects (`.status` / `.status_code`) without importing any of
+    them -- this must work on whatever a monkeypatched test hands it too.
+    """
+    for attr in ("status_code", "status"):
+        value = getattr(error, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(error, "response", None)
+    if response is not None:
+        value = getattr(response, "status_code", None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def is_quota_error(error: Any) -> bool:
+    """Whether this failure is the provider saying "you hit your limit".
+
+    Pure, so every provider's shapes (HTTP 429, Google OVER_QUERY_LIMIT /
+    RESOURCE_EXHAUSTED, AWS ThrottlingException, OpenAI insufficient_quota)
+    are testable without a provider.
+    """
+    if error is None:
+        return False
+    if _http_status_of(error) == 429:
+        return True
+    return bool(_QUOTA_TEXT.search(_scrub_secrets(str(error))))
+
+
+# How long one recorded quota failure speaks for its successors. A quota storm
+# is hundreds of identical 429s in minutes -- on the resident intake path --
+# and each one costing a DB write would make the bookkeeping more expensive
+# than the failed call. One row-write per connector per window is plenty: the
+# card goes red on the first one, and DOWN_AFTER only needs the failures to
+# keep arriving, not to arrive densely.
+QUOTA_RECORD_EVERY = timedelta(minutes=10)
+
+# Per-process on purpose (web worker and Celery worker each keep their own),
+# so the worst case is one write per window per process, which is still cheap.
+_quota_last_recorded: Dict[str, float] = {}
+
+
+def _quota_should_record(connector: str, *, now: Optional[float] = None) -> bool:
+    """Claim this window for `connector`, or report that it is already taken.
+
+    Stamps *before* the caller writes, so a storm cannot stampede the database
+    while a slow or failing write is in flight -- losing one repeat data point
+    is the cheap direction.
+    """
+    now = time.monotonic() if now is None else now
+    last = _quota_last_recorded.get(connector)
+    if last is not None and (now - last) < QUOTA_RECORD_EVERY.total_seconds():
+        return False
+    _quota_last_recorded[connector] = now
+    return True
+
+
+def _reset_quota_throttle() -> None:
+    """Tests only: monotonic time cannot be rewound, so the dict is cleared."""
+    _quota_last_recorded.clear()
+
+
+async def note_quota_failure(connector: str, error: Any,
+                             provider: Optional[str] = None) -> bool:
+    """Flag a runtime quota failure on the connector's health row. Never raises.
+
+    Returns whether a row was written -- False for a non-quota error (the
+    caller can pass every failure through without classifying it first) and
+    for a repeat inside the throttle window. Callers hold no session; the
+    write happens in one of our own via `_recording_session(None)` inside
+    `record_failure`, so it cannot commit anything the caller half-applied.
+    """
+    try:
+        if not is_quota_error(error):
+            return False
+        if not _quota_should_record(connector):
+            return False
+        await record_failure(None, connector, error, provider=provider)
+        return True
+    except Exception as exc:  # record_failure swallows; this covers the rest
+        logger.warning("[Health] could not note quota failure for %s: %s",
+                       sanitize_for_log(connector), sanitize_for_log(str(exc)))
+        return False

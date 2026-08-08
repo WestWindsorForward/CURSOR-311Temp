@@ -13,5 +13,14 @@ export default defineConfig({
     test: {
         environment: 'jsdom',
         include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+        /* Vitest's default is 5s, which the setup-page tests exceed whenever the
+         * machine is busy: each one mounts the whole integrations page --
+         * hundreds of nodes, a dozen mocked fetches, framer-motion measuring
+         * keyframes -- and several of them run at once. They were passing on
+         * margin, so adding any test file anywhere in the suite tipped them
+         * over, and the failure reads as a broken page rather than as a slow
+         * one. The page mounts take single-digit seconds when they work; a real
+         * hang still fails, twenty seconds later. */
+        testTimeout: 20000,
     },
 });

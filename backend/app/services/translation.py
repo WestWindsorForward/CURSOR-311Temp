@@ -190,6 +190,12 @@ async def translate_text(
     except Exception as e:
         from app.core.sanitize import sanitize_for_log
         logger.error(f"Translation failed ({sanitize_for_log(source_lang)} -> {sanitize_for_log(target_lang)}): {e}")
+        # Returning None already keeps the caller (and the resident) whole;
+        # a quota failure additionally belongs on the admin's health card, or
+        # a town at its hard limit serves English silently for a month.
+        from app.services import connector_health
+        await connector_health.note_quota_failure(
+            "translation", e, provider=getattr(provider, "provider", None))
         return None
 
 
@@ -250,6 +256,11 @@ async def translate_batch(
         return results
     except Exception as e:
         logger.error(f"Batch translation failed: {e}")
+        # Originals below keep /translate/batch a 200 whatever the provider
+        # said; the health note is the only place a rate-limit surfaces.
+        from app.services import connector_health
+        await connector_health.note_quota_failure(
+            "translation", e, provider=getattr(provider, "provider", None))
         for t in uncached:
             results[t] = t
         return results

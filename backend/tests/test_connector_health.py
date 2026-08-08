@@ -275,8 +275,12 @@ def test_the_sweep_really_does_run_daily():
     pytest.importorskip("celery")
     from app.core.celery_app import celery_app
 
+    from celery.schedules import crontab
     entry = celery_app.conf.beat_schedule["daily-connector-check"]
-    assert entry["schedule"] == 60 * 60 * 24
+    # A crontab, not an interval. An interval counts from worker boot and
+    # resets on every restart, so during active deployment the daily sweep
+    # never fired at all -- cards read "checked 2 days ago" and meant it.
+    assert isinstance(entry["schedule"], crontab)
 
 
 def test_the_stale_summary_does_not_quote_a_threshold_of_its_own():

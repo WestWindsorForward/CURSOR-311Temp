@@ -91,6 +91,15 @@ def research_visibility_conditions():
 
     One function rather than four copies of the same two conditions, so a new
     research endpoint cannot forget one of them.
+
+    Deliberately NOT filtered here: `public_archived`, and the town's
+    `public_archive_days` policy. Both are decluttering -- a clerk deciding the
+    public map does not need last spring's resolved potholes on it -- and
+    neither is anybody asking for the record to be withheld. Dropping archived
+    reports from the research set would silently truncate a town's history at
+    whatever date its map got busy, and would do it to longitudinal analyses
+    that are the whole point of the export. Only the resident's own unlisted
+    choice keeps a row out. Please leave it that way.
     """
     return (
         ServiceRequest.deleted_at.is_(None),

@@ -96,8 +96,10 @@ NEVER = {
     "flagged", "flag_reason",
     # Deletion and archival bookkeeping.
     "deleted_at", "deleted_by", "delete_justification", "archived_at",
-    # Whether the town lists it publicly is a Pinpoint setting.
-    "is_public",
+    # Where the report is listed on Pinpoint's own tracker and map is a Pinpoint
+    # setting, whether the resident chose it (is_public) or staff did
+    # (public_archived). Neither says anything about the work order.
+    "is_public", "public_archived",
     # AI output. Sending it copies a generated assessment of a resident's
     # report into a system the retention policy cannot reach -- the scrub
     # clears these columns here and would leave the vendor's copy untouched.

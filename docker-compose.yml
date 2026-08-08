@@ -132,6 +132,13 @@ services:
       ACCELA_CLIENT_ID: ${ACCELA_CLIENT_ID:-}
       ACCELA_CLIENT_SECRET: ${ACCELA_CLIENT_SECRET:-}
       ACCELA_REDIRECT_URI: ${ACCELA_REDIRECT_URI:-}
+      # Operator-hosted deployment registration form (e.g. a Microsoft Form).
+      # When set, the admin console offers it instead of the built-in contact
+      # form, filling in any {organization}/{deployment_url}/... tokens the URL
+      # contains. Empty is fine — the in-app form is the fallback. See
+      # .env.example for the token list.
+      CONTACT_FORM_URL: ${CONTACT_FORM_URL:-}
+      CONTACT_FORM_EMBED: ${CONTACT_FORM_EMBED:-true}
       PROJECT_ROOT: /project
     depends_on:
       db:

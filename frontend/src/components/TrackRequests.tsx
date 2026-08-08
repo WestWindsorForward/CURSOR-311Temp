@@ -15,7 +15,6 @@ import {
     Copy,
     Check,
     ExternalLink,
-    Shield,
     User,
     X,
     Star,
@@ -26,6 +25,7 @@ import { Card, Input, Button, Textarea } from './ui';
 import { api } from '../services/api';
 import { PublicServiceRequest, RequestComment, AuditLogEntry } from '../types';
 import { TranslatedContent } from './TranslatedContent';
+import { CommentCard, CommentEmptyState, CommentSkeleton } from './commentUI';
 import RequestDetailMap from './RequestDetailMap';
 import { RawMapsConfig, mapProviderReady, resolveMapProviderConfig } from '../maps';
 
@@ -687,56 +687,28 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                     {/* Comment List */}
                     <div className="space-y-4 max-h-[500px] overflow-y-auto">
                         {isLoadingComments ? (
-                            <div className="flex justify-center py-8">
-                                <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
-                            </div>
+                            <CommentSkeleton rows={2} />
                         ) : comments.length === 0 ? (
-                            <div className="text-center py-8">
-                                <MessageSquare className="w-12 h-12 mx-auto mb-3 text-white/60" />
-                                <p className="text-white/70">{"No comments yet"}</p>
-                                <p className="text-white/60 text-sm">{"Be the first to share an update!"}</p>
-                            </div>
+                            <CommentEmptyState
+                                title="No comments yet"
+                                hint="Be the first to share an update!"
+                            />
                         ) : (
-                            comments.map((comment, index) => {
-                                const isStaff = comment.username !== 'Resident';
-                                return (
-                                    <motion.div
-                                        key={comment.id}
-                                        initial={{ opacity: 0, y: 10 }}
-                                        animate={{ opacity: 1, y: 0 }}
-                                        transition={{ delay: index * 0.05 }}
-                                        className={`p-4 rounded-xl border ${isStaff ? 'bg-gradient-to-r from-purple-500/10 to-transparent border-purple-500/20' : 'bg-gradient-to-r from-white/5 to-transparent border-white/10'}`}
-                                    >
-                                        <div className="flex justify-between items-center mb-3">
-                                            <div className="flex items-center gap-3">
-                                                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isStaff ? 'bg-purple-500/20' : 'bg-primary-500/20'}`}>
-                                                    {isStaff ? (
-                                                        <Shield className="w-4 h-4 text-purple-300" />
-                                                    ) : (
-                                                        <User className="w-4 h-4 text-primary-300" />
-                                                    )}
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="font-medium text-white">{comment.username}</span>
-                                                    {isStaff && (
-                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                                                            <Shield className="w-3 h-3" />
-                                                            Staff
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <span className="text-white/40 text-xs">{formatDate(comment.created_at)}</span>
-                                        </div>
-                                        <p className="text-white/70 pl-11">
-                                            <TranslatedContent
-                                                text={comment.content}
-                                                contentId={`comment_${comment.id}`}
-                                            />
-                                        </p>
-                                    </motion.div>
-                                );
-                            })
+                            comments.map((comment, index) => (
+                                <motion.div
+                                    key={comment.id}
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ delay: index * 0.05 }}
+                                >
+                                    <CommentCard comment={comment}>
+                                        <TranslatedContent
+                                            text={comment.content}
+                                            contentId={`comment_${comment.id}`}
+                                        />
+                                    </CommentCard>
+                                </motion.div>
+                            ))
                         )}
                     </div>
                 </Card>

@@ -127,8 +127,13 @@ def test_vaulting_runs_often_enough_to_matter():
     pytest.importorskip("celery")
     from app.core.celery_app import celery_app
 
+    from celery.schedules import crontab
     entry = celery_app.conf.beat_schedule["hourly-secret-vaulting"]
-    assert entry["schedule"] <= 60 * 60
+    # Once an hour at a fixed minute. crontab(minute=N) fires hourly by
+    # construction and survives worker restarts, which the old <= 1h interval
+    # did not.
+    assert isinstance(entry["schedule"], crontab)
+    assert entry["schedule"].hour == set(range(24))
 
 
 # ---------------------------------------------------------------------------

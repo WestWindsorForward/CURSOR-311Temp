@@ -46,7 +46,10 @@ import {
     FlaskConical,
     Home,
     FlagTriangleRight,
+    Lock,
+    Globe,
 } from 'lucide-react';
+import { CommentCard, CommentEmptyState } from '../components/commentUI';
 import { Button, Card, Modal, Input, Textarea, Select, StatusBadge, Badge } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useSettings } from '../context/SettingsContext';
@@ -271,6 +274,7 @@ export default function StaffDashboard() {
         requests: allRequests,
         readIds: readIdsFromStorage(localStorage.getItem('activityFeedRead')),
         departmentIds: userDepartmentIds,
+        username: user?.username,
         now: Date.now(),
     }), [allRequests, userDepartmentIds, activityTick, showActivityFeed]);
 
@@ -2305,6 +2309,45 @@ export default function StaffDashboard() {
                                                 <span className="sm:hidden">{selectedRequest.flagged === true ? 'Legal Hold ✓' : 'Legal Hold'}</span>
                                             </button>
                                         )}
+
+                                        {/* Row 5: Archive from public view. Any staff member --
+                                            deciding the map does not need last spring's resolved
+                                            potholes on it is routine clerk work, not the
+                                            legal-hold kind of decision. Nothing is deleted. */}
+                                        <button
+                                            onClick={async () => {
+                                                const nowArchived = selectedRequest.public_archived !== true;
+                                                try {
+                                                    const updated = await api.setPublicArchived(
+                                                        selectedRequest.service_request_id, nowArchived);
+                                                    setSelectedRequest(updated);
+                                                    setRequests(prev => prev.map(r => r.id === updated.id ? updated : r));
+                                                    loadAuditLog(selectedRequest.service_request_id);
+                                                } catch (err) {
+                                                    console.error('Failed to change public visibility:', err);
+                                                }
+                                            }}
+                                            className={`w-full py-1.5 sm:py-2 px-3 sm:px-4 rounded-lg text-xs sm:text-sm font-medium transition-all flex items-center justify-center gap-1.5 sm:gap-2 ${selectedRequest.public_archived === true
+                                                ? 'bg-gradient-to-r from-slate-500 to-slate-600 text-white shadow-lg shadow-slate-500/30 ring-2 ring-white/20'
+                                                : 'bg-white/5 border border-white/10 text-white/70 hover:bg-slate-500/20 hover:text-slate-200 hover:border-slate-500/30'
+                                                }`}
+                                            title="Archive from public view \u2014 the report stays, residents with the link still see it"
+                                            aria-label={selectedRequest.public_archived === true
+                                                ? 'Put this report back on the public tracker and map'
+                                                : 'Archive from public view \u2014 the report stays, residents with the link still see it'}
+                                        >
+                                            <EyeOff className="w-3.5 h-3.5 sm:w-4 sm:h-4" aria-hidden="true" />
+                                            <span className="hidden sm:inline">{selectedRequest.public_archived === true
+                                                ? 'Archived from Public View (Click to Restore)'
+                                                : 'Archive from Public View'}</span>
+                                            <span className="sm:hidden">{selectedRequest.public_archived === true ? 'Archived \u2713' : 'Archive'}</span>
+                                        </button>
+
+                                        {selectedRequest.public_archived === true && (
+                                            <p className="text-[11px] text-white/40 text-center">
+                                                Off the public tracker and map. The report stays &mdash; residents with the link still see it, and it is still in research exports.
+                                            </p>
+                                        )}
                                     </div>
 
                                     {/* Scrollable Content - Professional Government Styling */}
@@ -3034,6 +3077,14 @@ export default function StaffDashboard() {
                                                                 actionConfig = { color: 'bg-indigo-500', text: `Assigned to ${entry.new_value}` };
                                                             } else if (entry.action === 'comment_added') {
                                                                 actionConfig = { color: 'bg-teal-500', text: 'Comment added' };
+                                                            } else if (entry.action === 'public_archive') {
+                                                                const isArchived = entry.new_value === 'archived';
+                                                                actionConfig = {
+                                                                    color: isArchived ? 'bg-slate-500' : 'bg-emerald-500',
+                                                                    text: isArchived
+                                                                        ? '\ud83d\udc41\ufe0f Archived from public view'
+                                                                        : '\ud83d\udc41\ufe0f Restored to public view'
+                                                                };
                                                             } else if (entry.action === 'legal_hold') {
                                                                 // Show if legal hold was enabled or removed
                                                                 const isEnabled = entry.new_value === 'enabled';
@@ -3088,60 +3139,59 @@ export default function StaffDashboard() {
                                         </div>
 
                                         {/* ═══ SECTION 5: Comments ═══ */}
-                                        <div className="p-4 rounded-lg bg-slate-800/50 border border-white/10">
-                                            <div className="flex items-center gap-2 mb-4">
-                                                <MessageSquare className="w-4 h-4 text-blue-400" />
-                                                <span className="font-medium text-white">Comments</span>
+                                        <div className="p-5 rounded-3xl bg-gradient-to-br from-white/[0.06] via-white/[0.02] to-indigo-950/40 border border-white/10 backdrop-blur-2xl">
+                                            <div className="flex items-center gap-2 mb-4 text-[11px] uppercase tracking-wider text-white/60 font-semibold">
+                                                <MessageSquare className="w-4 h-4 text-primary-200" aria-hidden="true" />
+                                                Comments
                                                 {comments.length > 0 && (
-                                                    <span className="px-2 py-0.5 rounded-full text-xs bg-white/10 text-white/60">{comments.length}</span>
+                                                    <span className="px-2 py-0.5 rounded-2xl border border-white/15 bg-white/[0.07] text-white/70 tabular-nums normal-case tracking-normal">{comments.length}</span>
                                                 )}
                                             </div>
 
                                             {/* Comments List */}
-                                            {comments.length > 0 && (
-                                                <div className="space-y-3 max-h-64 overflow-y-auto mb-4 pr-1">
+                                            {comments.length > 0 ? (
+                                                <div className="space-y-3 max-h-72 overflow-y-auto mb-4 pr-1">
                                                     {comments.map(c => (
-                                                        <div key={c.id} className={`rounded-lg overflow-hidden ${c.visibility === 'internal' ? 'bg-orange-500/5' : 'bg-slate-700/30'}`}>
-                                                            {/* Comment Header */}
-                                                            <div className={`px-3 py-2 flex items-center gap-2 text-xs ${c.visibility === 'internal' ? 'bg-orange-500/10 border-b border-orange-500/20' : 'bg-slate-600/30 border-b border-white/5'}`}>
-                                                                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${c.visibility === 'internal' ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                                                                    {c.username?.charAt(0).toUpperCase() || '?'}
-                                                                </div>
-                                                                <span className="font-medium text-white/90">{c.username}</span>
-                                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${c.visibility === 'internal' ? 'bg-orange-500/20 text-orange-400' : 'bg-green-500/20 text-green-400'}`}>
-                                                                    {c.visibility === 'internal' ? 'Internal' : 'Public'}
-                                                                </span>
-                                                                <span className="text-white/30 ml-auto">{c.created_at ? new Date(c.created_at).toLocaleString() : ''}</span>
-                                                            </div>
-                                                            {/* Comment Body */}
-                                                            <div className="px-3 py-2.5">
-                                                                <p className="text-sm text-white/80 leading-relaxed">{c.content}</p>
-                                                            </div>
-                                                        </div>
+                                                        <CommentCard key={c.id} comment={c} showVisibility />
                                                     ))}
                                                 </div>
-                                            )}
-
-                                            {comments.length === 0 && (
-                                                <div className="text-center py-6 text-white/30 text-sm mb-4">
-                                                    No comments yet
+                                            ) : (
+                                                <div className="mb-4">
+                                                    <CommentEmptyState
+                                                        title="No comments yet"
+                                                        hint="Internal notes stay with staff; public replies reach the reporter."
+                                                    />
                                                 </div>
                                             )}
 
                                             {/* Add Comment */}
-                                            <div className={`rounded-lg overflow-hidden ${commentVisibility === 'internal' ? 'bg-orange-950/20 border border-orange-500/20' : 'bg-green-950/20 border border-green-500/20'}`}>
-                                                <div className="px-3 py-2 flex items-center gap-2 border-b border-white/5">
-                                                    <span className={`text-xs font-semibold ${commentVisibility === 'internal' ? 'text-orange-400' : 'text-green-400'}`}>
-                                                        {commentVisibility === 'internal' ? '🔒 Internal Note - Staff Only' : '🌐 Public Reply - Visible to Reporter'}
+                                            <div className={`rounded-2xl border transition-colors ${commentVisibility === 'internal' ? 'bg-amber-500/[0.04] border-amber-400/25' : 'bg-emerald-500/[0.04] border-emerald-400/25'}`}>
+                                                <div className="px-3.5 pt-3 flex items-center gap-2 flex-wrap">
+                                                    <div className="inline-flex rounded-xl bg-white/[0.05] border border-white/10 p-0.5" role="group" aria-label="Comment visibility">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setCommentVisibility('internal')}
+                                                            aria-pressed={commentVisibility === 'internal'}
+                                                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[10px] text-xs font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 ${commentVisibility === 'internal' ? 'bg-gradient-to-r from-amber-500/25 to-orange-500/25 text-amber-200 shadow-sm' : 'text-white/60 hover:text-white/90'}`}
+                                                        >
+                                                            <Lock className="w-3 h-3" aria-hidden="true" />
+                                                            Internal note
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setCommentVisibility('external')}
+                                                            aria-pressed={commentVisibility === 'external'}
+                                                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[10px] text-xs font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 ${commentVisibility === 'external' ? 'bg-gradient-to-r from-emerald-500/25 to-teal-500/25 text-emerald-200 shadow-sm' : 'text-white/60 hover:text-white/90'}`}
+                                                        >
+                                                            <Globe className="w-3 h-3" aria-hidden="true" />
+                                                            Public reply
+                                                        </button>
+                                                    </div>
+                                                    <span className={`text-[11px] ${commentVisibility === 'internal' ? 'text-amber-200/70' : 'text-emerald-200/70'}`}>
+                                                        {commentVisibility === 'internal' ? 'Staff only' : 'Visible to the reporter'}
                                                     </span>
-                                                    <button
-                                                        onClick={() => setCommentVisibility(commentVisibility === 'internal' ? 'external' : 'internal')}
-                                                        className={`ml-auto px-2 py-1 rounded text-xs font-medium transition-all ${commentVisibility === 'internal' ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30'}`}
-                                                    >
-                                                        Switch to {commentVisibility === 'internal' ? 'Public' : 'Internal'}
-                                                    </button>
                                                 </div>
-                                                <div className="p-3 flex gap-2">
+                                                <div className="p-3.5 flex gap-2">
                                                     <input
                                                         type="text"
                                                         placeholder={commentVisibility === 'internal' ? 'Add internal note...' : 'Reply to reporter...'}
@@ -3149,12 +3199,12 @@ export default function StaffDashboard() {
                                                         value={newComment}
                                                         onChange={(e) => setNewComment(e.target.value)}
                                                         onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleAddComment()}
-                                                        className="flex-1 py-2 px-3 rounded-lg bg-slate-900/50 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                                        className="flex-1 rounded-xl bg-white/[0.04] border border-white/10 text-white text-sm px-3.5 py-2.5 placeholder:text-white/40 transition-all focus:outline-none focus:border-primary-400/50 focus:bg-white/[0.06] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
                                                     />
                                                     <button
                                                         onClick={handleAddComment}
                                                         disabled={!newComment.trim() || isSubmittingComment}
-                                                        className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium disabled:opacity-50 flex items-center gap-2 transition-colors"
+                                                        className="px-4 py-2 rounded-2xl border border-primary-400/50 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-400 hover:to-primary-500 text-white text-sm font-semibold shadow-lg shadow-primary-500/25 hover:shadow-primary-500/40 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
                                                         aria-label="Send comment"
                                                     >
                                                         <Send className="w-4 h-4" aria-hidden="true" />

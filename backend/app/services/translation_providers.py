@@ -121,6 +121,12 @@ class AWSTranslateProvider(TranslationProvider):
         def _run():
             client = self._client()
             out = []
+            # Kept alongside the originals rather than raised: one bad string
+            # must not cost the rest of the batch, but swallowing the error
+            # entirely is how a ThrottlingException storm stays invisible --
+            # the caller substitutes originals and nobody upstream ever sees
+            # AWS said "Rate exceeded". The first error is enough evidence.
+            errors = []
             # Amazon Translate is one string per call; batch sequentially.
             for t in texts:
                 try:
@@ -128,12 +134,20 @@ class AWSTranslateProvider(TranslationProvider):
                         Text=t, SourceLanguageCode=source_lang, TargetLanguageCode=target_lang,
                     )
                     out.append(resp.get("TranslatedText", t))
-                except Exception:
+                except Exception as exc:
+                    if not errors:
+                        errors.append(exc)
                     out.append(t)
-            return out
+            return out, errors
 
         try:
-            return await asyncio.get_event_loop().run_in_executor(None, _run)
+            out, errors = await asyncio.get_event_loop().run_in_executor(None, _run)
+            if errors:
+                # Back on the event loop, so the async health write is possible.
+                from app.services import connector_health
+                await connector_health.note_quota_failure(
+                    "translation", errors[0], provider=self.provider)
+            return out
         except Exception as e:
             logger.warning(f"AWS Translate failed: {e}")
             return None

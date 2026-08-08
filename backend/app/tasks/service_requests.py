@@ -275,6 +275,16 @@ def analyze_request(self, request_id: int):
                         if "_error" in ai_result:
                             logger.error(f"[Analysis] AI error: {ai_result.get('_error')}")
                             analysis["_error"] = ai_result["_error"]
+                            # The adapters never raise -- a quota failure
+                            # (Vertex 429/RESOURCE_EXHAUSTED, Azure 429,
+                            # Bedrock ThrottlingException) arrives as this
+                            # fallback dict and the report still processes
+                            # with a manual-review default. That graceful
+                            # part stays; the health note is what stops it
+                            # being *invisible* to the administrator.
+                            from app.services import connector_health
+                            await connector_health.note_quota_failure(
+                                "ai", ai_result["_error"], provider=ai_provider.provider)
                         else:
                             analysis.update(ai_result)
                             ai_ran = True
@@ -292,8 +302,15 @@ def analyze_request(self, request_id: int):
                         )
                     except Exception as e:
                         logger.warning(f"[Analysis] usage tracking failed: {e}")
-                except Exception:
+                except Exception as ai_exc:
                     logger.warning("[Analysis] AI summary failed", exc_info=True)
+                    # Adapters shouldn't raise, but a quota error surfacing as
+                    # an exception still deserves the same flag as one arriving
+                    # in the fallback dict above. note_quota_failure never
+                    # raises, so this cannot re-break the swallowed branch.
+                    from app.services import connector_health
+                    await connector_health.note_quota_failure(
+                        "ai", ai_exc, provider=ai_provider.provider)
 
             # Fold the AI photo/text assessment into the moderation flag (image
             # moderation lives here — it needs the vision model). Graceful no-op
@@ -616,8 +633,16 @@ def send_comment_notification_task(request_id: int, comment_author: str, comment
 
 
 @celery_app.task
-def send_department_notification(request_id: int, department_email: str):
-    """Notify department staff based on their individual notification preferences"""
+def send_department_notification(request_id: int, department_email: str = None):
+    """Notify staff of a new request, honoring each user's notification preferences.
+
+    `department_email` is optional: it is the routed department's routing_email
+    when one is configured, used only as the no-recipients archive fallback and
+    as a legacy lookup for messages queued by older API code. Recipients come
+    from the request itself — the assignee, else the routed department's staff,
+    else the town's active admins (small towns often have no department
+    memberships at all, and their preference toggles must still mean something).
+    """
     import logging
     logger = logging.getLogger(__name__)
     
@@ -648,19 +673,30 @@ def send_department_notification(request_id: int, department_email: str):
             if not request:
                 return {"error": "Request not found"}
             
-            # Find staff members who should receive this notification
-            # Get department by email to find staff members
-            dept_result = await db.execute(
-                select(Department).where(Department.routing_email == department_email)
-            )
-            department = dept_result.scalar_one_or_none()
-            
+            # Resolve the routed department from the request itself; the
+            # routing_email lookup remains only for messages queued by older
+            # API code that passed the email without the request being routed.
+            department = None
+            if request.assigned_department_id:
+                dept_result = await db.execute(
+                    select(Department).where(Department.id == request.assigned_department_id)
+                )
+                department = dept_result.scalar_one_or_none()
+            if department is None and department_email:
+                dept_result = await db.execute(
+                    select(Department).where(Department.routing_email == department_email)
+                )
+                department = dept_result.scalar_one_or_none()
+
             notified_staff = []
 
-            # Recipient default: the specifically-assigned person. Only when no
-            # one is assigned do we notify the whole routed department.
+            # Recipient tiers: assignee → department staff → active admins.
+            # The admin tier is what keeps the Notification Settings toggles
+            # alive in a town with no department memberships configured.
             from app.models import User, user_departments
-            staff_members = []
+            from app.services.notification_rules import pick_recipient_group
+
+            assignee = None
             if request.assigned_to:
                 assignee_result = await db.execute(
                     select(User)
@@ -668,16 +704,23 @@ def send_department_notification(request_id: int, department_email: str):
                     .where(User.is_active == True)
                 )
                 assignee = assignee_result.scalar_one_or_none()
-                if assignee:
-                    staff_members = [assignee]
-            elif department:
+
+            department_staff = []
+            if department:
                 staff_result = await db.execute(
                     select(User)
                     .join(user_departments)
                     .where(user_departments.c.department_id == department.id)
                     .where(User.is_active == True)
                 )
-                staff_members = list(staff_result.scalars().all())
+                department_staff = list(staff_result.scalars().all())
+
+            admin_result = await db.execute(
+                select(User).where(User.role == "admin").where(User.is_active == True)
+            )
+            admins = list(admin_result.scalars().all())
+
+            staff_members = pick_recipient_group(assignee, department_staff, admins)
 
             if staff_members:
                 from app.services.notification_rules import should_notify_staff
@@ -881,6 +924,19 @@ def notify_staff_of_activity(request_id: int, event: str, actor: str = None):
                     )
                     for s in staff_result.scalars().all():
                         recipients[s.id] = s
+
+            # Last tier: nobody assigned, nobody has touched it, and the routed
+            # department has no members (or the assignee was deactivated) — the
+            # normal shape for a small town with no department memberships.
+            # Route to the active admins so the event is not silently dropped;
+            # should_notify_staff below still skips the actor and applies each
+            # admin's own preference toggles.
+            if not recipients:
+                admin_result = await db.execute(
+                    select(User).where(User.role == "admin").where(User.is_active == True)
+                )
+                for a in admin_result.scalars().all():
+                    recipients[a.id] = a
 
             staff_link = f"{portal_url}/staff#request/{request.service_request_id}"
             status_text = getattr(request.status, 'value', request.status) or ''

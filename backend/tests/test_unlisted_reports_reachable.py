@@ -22,8 +22,9 @@ pytest.importorskip("fastapi")
 
 from sqlalchemy import select
 
-from app.api.open311 import direct_link_filters, public_visibility_filters
+from app.api.open311 import direct_link_filters
 from app.models import ServiceRequest
+from app.services.public_visibility import publicly_listed_conditions
 
 
 def _sql(filters):
@@ -32,7 +33,7 @@ def _sql(filters):
 
 
 def test_the_public_listing_hides_unlisted_reports():
-    assert "is_public" in _sql(public_visibility_filters())
+    assert "is_public" in _sql(publicly_listed_conditions())
 
 
 def test_a_direct_link_does_not_hide_them():
@@ -45,7 +46,7 @@ def test_a_direct_link_does_not_hide_them():
 def test_both_rules_exclude_soft_deleted_records():
     """Two of the four by-id endpoints were missing this, so a deleted request
     still served its comments."""
-    assert "deleted_at IS NULL" in _sql(public_visibility_filters())
+    assert "deleted_at IS NULL" in _sql(publicly_listed_conditions())
     assert "deleted_at IS NULL" in _sql(direct_link_filters())
 
 

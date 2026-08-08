@@ -747,6 +747,14 @@ async def detect(provider: str, raw: bytes, width: int, height: int,
     except Exception as exc:
         from app.core.sanitize import sanitize_for_log
         logger.warning("[Redaction] %s could not detect: %s", provider, sanitize_for_log(str(exc)))
+        # A cloud detector over its quota is exactly the failure the caller's
+        # degrade-to-local path was built for -- the photo still gets blurred,
+        # which is why nobody in the portal ever notices. The health note is
+        # the only trace: the town selected cloud detection and is silently
+        # getting the weaker on-server kind. Local has no quota to hit.
+        if provider != "local":
+            from app.services import connector_health
+            await connector_health.note_quota_failure("redaction", exc, provider=provider)
         return None
     return found
 
@@ -1271,6 +1279,11 @@ async def _google_screen_and_redact_one(media: str, faces: bool, plates: bool):
     except Exception as exc:
         from app.core.sanitize import sanitize_for_log
         logger.info("[Redaction] vision unavailable: %s", sanitize_for_log(str(exc)))
+        # Same flag as detect(): this combined moderation+redaction call is the
+        # other runtime path into Vision, and a 429 here is the same exhausted
+        # quota an administrator needs to hear about exactly once per window.
+        from app.services import connector_health
+        await connector_health.note_quota_failure("redaction", exc, provider="google")
         return ModerationResult(), RedactionResult(media, skipped_reason="provider-error")
 
     verdict = safesearch_from_payload(payload)

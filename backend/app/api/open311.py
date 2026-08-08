@@ -11,7 +11,8 @@ from app.db.session import get_db
 from app.models import ServiceRequest, ServiceDefinition, User, RequestAuditLog, Department
 from app.schemas import (
     ServiceRequestCreate, ServiceRequestResponse, ServiceRequestDetailResponse,
-    ServiceRequestUpdate, ServiceRequestDelete, ManualIntakeCreate, RequestAuditLogResponse
+    ServiceRequestUpdate, ServiceRequestDelete, ManualIntakeCreate, RequestAuditLogResponse,
+    PublicArchiveUpdate
 )
 from app.core.auth import get_current_staff
 from slowapi import Limiter
@@ -32,6 +33,7 @@ def generate_request_id() -> str:
 
 from app.services import road_blocking
 from app.services.enqueue import enqueue
+from app.services.public_visibility import publicly_listed_conditions
 from app.core.config import get_settings
 import redis.asyncio as redis
 import json
@@ -71,21 +73,21 @@ async def resolve_is_public(db: AsyncSession, requested_is_public) -> bool:
         return True
 
 
-def public_visibility_filters():
-    """WHERE clauses that define what the PUBLIC may see in a listing.
+async def read_settings_row(db: AsyncSession):
+    """The SystemSettings singleton, or None if a read fails.
 
-    Kept as one named helper so every public list uses the same rule and a future
-    edit can't quietly drop it — a missing clause here silently republishes every
-    report a resident asked to keep unlisted.
-
-    Excludes soft-deleted records and requests the resident marked unlisted.
-    Unlisted still means: reachable by direct tracking link, and fully visible to
-    staff. It never hides a request from the town.
+    Only the public listing needs this, and only to learn the archival policy.
+    Failing soft is the right direction here for the same reason it is in
+    `resolve_is_public`: a settings hiccup should leave the town's reports
+    listed, not blank the public map.
     """
-    return (
-        ServiceRequest.deleted_at.is_(None),
-        ServiceRequest.is_public.is_(True),
-    )
+    try:
+        from app.models import SystemSettings
+        result = await db.execute(select(SystemSettings).order_by(SystemSettings.id).limit(1))
+        return result.scalar_one_or_none()
+    except Exception as e:
+        logger.warning(f"settings read failed, public archival policy not applied: {e}")
+        return None
 
 
 def direct_link_filters():
@@ -118,9 +120,18 @@ async def list_public_requests(
     db: AsyncSession = Depends(get_db)
 ):
     """Public endpoint - List all requests WITHOUT personal information (cached)"""
-    # Build cache key
-    cache_key = f"public_requests:{status or 'all'}:{service_code or 'all'}:{limit}:{offset}"
-    
+    # Read before the cache lookup, and put the policy in the key: an admin who
+    # changes the number expects the map to change, not to change in up to a
+    # minute, and a cached list built under the old policy is exactly the wrong
+    # thing to serve back. One indexed singleton row.
+    settings_row = await read_settings_row(db)
+    archive_days = getattr(settings_row, "public_archive_days", None) or 0
+
+    cache_key = (
+        f"public_requests:{status or 'all'}:{service_code or 'all'}:{limit}:{offset}"
+        f":arch{archive_days}"
+    )
+
     # Try cache first
     try:
         cached = await redis_client.get(cache_key)
@@ -129,10 +140,12 @@ async def list_public_requests(
     except redis.RedisError:
         logger.debug("Redis unavailable for cache read, proceeding without cache")
 
-    # Unlisted reports are excluded from every public listing. They remain fully
-    # reachable by their direct tracking link (the by-id endpoints below) and are
-    # always visible to staff — "unlisted", not "hidden from the town".
-    query = select(ServiceRequest).where(*public_visibility_filters())
+    # Three ways to be absent from this list, none of which deletes anything:
+    # the resident asked for it to be unlisted, staff archived it from public
+    # view, or the town's policy aged it out. All of them remain reachable by
+    # direct tracking link (the by-id endpoints below) and fully visible to
+    # staff. See app/services/public_visibility.py.
+    query = select(ServiceRequest).where(*publicly_listed_conditions(settings_row))
 
     if status:
         query = query.where(ServiceRequest.status == status)
@@ -882,14 +895,21 @@ async def _finalize_new_request(
     if notify_resident:
         enqueue(send_branded_notification, service_request.id, "confirmation")
 
-    # Notify department staff based on their notification preferences
+    # Notify staff about the new request — always enqueued, never gated on the
+    # department having a routing_email. The worker resolves who to tell from
+    # the request itself (assignee → department staff → admins) and applies each
+    # person's Notification Settings; routing_email is only the no-recipients
+    # archive fallback. The old gate (`if dept.routing_email`) meant a town that
+    # never filled that field in — most of them — notified nobody, and the
+    # preference toggles were never even consulted.
+    routing_email = None
     if assigned_department_id:
         dept_result = await db.execute(
             select(Department).where(Department.id == assigned_department_id)
         )
         dept = dept_result.scalar_one_or_none()
-        if dept and dept.routing_email:
-            enqueue(send_department_notification, service_request.id, dept.routing_email)
+        routing_email = (dept.routing_email or None) if dept else None
+    enqueue(send_department_notification, service_request.id, routing_email)
 
 
 @router.get("/requests.json", response_model=List[ServiceRequestResponse])
@@ -1131,6 +1151,60 @@ async def update_request_status(
     # Reload with relationship for response
     await db.refresh(request)
     # Reload the relationship if department was set
+    if request.assigned_department_id:
+        await db.refresh(request, ['assigned_department'])
+    return request
+
+
+@router.patch("/requests/{request_id}/public-archive", response_model=ServiceRequestDetailResponse)
+async def set_public_archived(
+    request_id: str,
+    payload: PublicArchiveUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_staff)
+):
+    """Take one report off the public tracker and map, or put it back (staff).
+
+    Nothing is deleted, redacted or hidden from staff, and the resident's
+    tracking link keeps working — this only decides whether the report appears
+    in public listings. Staff role, not admin: deciding that a report closed
+    last spring no longer needs to be on the map is routine clerk work, not the
+    legal-hold sort of decision.
+
+    Never touches `is_public`. That is the resident's answer to a different
+    question, and a report they asked to keep unlisted stays unlisted whatever
+    is done here.
+    """
+    result = await db.execute(
+        select(ServiceRequest).options(selectinload(ServiceRequest.assigned_department)).where(
+            ServiceRequest.service_request_id == request_id,
+            *direct_link_filters(),
+        )
+    )
+    request = result.scalar_one_or_none()
+    if not request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    was_archived = bool(request.public_archived)
+    if was_archived == payload.public_archived:
+        return request  # no change, no audit noise
+
+    request.public_archived = payload.public_archived
+    request.updated_datetime = datetime.now(timezone.utc)
+
+    # Who did what, on the same tamper-evident chain as every other change to
+    # this report, so "why did this drop off the map" has an answer.
+    db.add(RequestAuditLog(
+        service_request_id=request.id,
+        action="public_archive",
+        old_value="archived" if was_archived else "listed",
+        new_value="archived" if payload.public_archived else "listed",
+        actor_type="admin" if current_user.role == "admin" else "staff",
+        actor_name=current_user.username,
+    ))
+
+    await db.commit()
+    await db.refresh(request)
     if request.assigned_department_id:
         await db.refresh(request, ['assigned_department'])
     return request

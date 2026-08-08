@@ -194,7 +194,10 @@ def test_it_is_registered_to_run_daily():
     entry = schedule.get("daily-connector-check")
     assert entry, f"not scheduled; have {sorted(schedule)}"
     assert entry["task"] == "app.tasks.connector_checks.verify_connectors"
-    assert entry["schedule"] == 60 * 60 * 24
+    # Wall-clock, not an interval: an interval counts from worker boot, so a
+    # deploy cadence faster than daily meant the sweep never ran.
+    from celery.schedules import crontab
+    assert isinstance(entry["schedule"], crontab)
     assert "app.tasks.connector_checks" in celery_app.conf.include
 
 

@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
+from app.services import connector_health
 from app.services.geocoding import GeocodingResult
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,30 @@ async def _bias(db) -> Optional[Dict[str, float]]:
 # ---------------------------------------------------------------------------
 
 
+# Google reports quota exhaustion in the body of a 200, not on the wire, so a
+# status-code check alone would call an exhausted key "no results found".
+_GOOGLE_QUOTA_STATUSES = ("OVER_QUERY_LIMIT", "RESOURCE_EXHAUSTED")
+
+
+async def _flag_google_quota(r, body) -> bool:
+    """True (after flagging the admin) when Google says the key is over quota.
+
+    The caller still returns None and falls through to OpenStreetMap -- the
+    resident's address box keeps answering, which is the point. The health row
+    is how anybody finds out it is answering from the fallback.
+    """
+    status = body.get("status")
+    if r.status_code != 429 and status not in _GOOGLE_QUOTA_STATUSES:
+        return False
+    await connector_health.note_quota_failure(
+        "maps",
+        f"Google geocoding over quota ({status or r.status_code}): "
+        f"{body.get('error_message') or 'rate limit exceeded'}",
+        provider="google",
+    )
+    return True
+
+
 async def _google(client, address, creds, bias) -> Optional[GeocodingResult]:
     key = creds.get("apiKey")
     if not key:
@@ -132,6 +157,7 @@ async def _google(client, address, creds, bias) -> Optional[GeocodingResult]:
         params["bounds"] = f"{bias['south']},{bias['west']}|{bias['north']},{bias['east']}"
     r = await client.get("https://maps.googleapis.com/maps/api/geocode/json", params=params)
     body = r.json()
+    await _flag_google_quota(r, body)
     if body.get("status") != "OK" or not body.get("results"):
         return None
     top = body["results"][0]
@@ -150,6 +176,7 @@ async def _google_reverse(client, lat, lng, creds, _bias) -> Optional[GeocodingR
     r = await client.get("https://maps.googleapis.com/maps/api/geocode/json",
                          params={"latlng": f"{lat},{lng}", "key": key})
     body = r.json()
+    await _flag_google_quota(r, body)
     if body.get("status") != "OK" or not body.get("results"):
         return None
     top = body["results"][0]
@@ -175,11 +202,21 @@ async def _esri(client, address, creds, bias) -> Optional[GeocodingResult]:
     if bias:
         params["searchExtent"] = f"{bias['west']},{bias['south']},{bias['east']},{bias['north']}"
     r = await client.get(f"{_esri_locator(creds)}/findAddressCandidates", params=params)
+    if r.status_code == 429:
+        await connector_health.note_quota_failure(
+            "maps", "Esri geocoding over quota (HTTP 429)", provider="esri")
     if r.status_code != 200:
         return None
     body = r.json()
     candidates = body.get("candidates") or []
-    if body.get("error") or not candidates:
+    error = body.get("error")
+    if isinstance(error, dict) and error.get("code") == 429:
+        # ArcGIS reports throttling as a 200 with an error body, so the wire
+        # status above never sees it.
+        await connector_health.note_quota_failure(
+            "maps", f"Esri geocoding over quota: {error.get('message') or 'HTTP 429'}",
+            provider="esri")
+    if error or not candidates:
         return None
     top = candidates[0]
     location = top.get("location") or {}
@@ -196,6 +233,9 @@ async def _esri_reverse(client, lat, lng, creds, _bias) -> Optional[GeocodingRes
     if creds.get("apiKey"):
         params["token"] = creds["apiKey"]
     r = await client.get(f"{_esri_locator(creds)}/reverseGeocode", params=params)
+    if r.status_code == 429:
+        await connector_health.note_quota_failure(
+            "maps", "Esri reverse geocoding over quota (HTTP 429)", provider="esri")
     if r.status_code != 200:
         return None
     body = r.json()
@@ -215,6 +255,9 @@ async def _azure(client, address, creds, bias) -> Optional[GeocodingResult]:
         params["topLeft"] = f"{bias['north']},{bias['west']}"
         params["btmRight"] = f"{bias['south']},{bias['east']}"
     r = await client.get("https://atlas.microsoft.com/search/address/json", params=params)
+    if r.status_code == 429:
+        await connector_health.note_quota_failure(
+            "maps", "Azure Maps geocoding over quota (HTTP 429)", provider="azure")
     if r.status_code != 200:
         return None
     results = (r.json().get("results") or [])
@@ -236,6 +279,9 @@ async def _azure_reverse(client, lat, lng, creds, _bias) -> Optional[GeocodingRe
         return None
     r = await client.get("https://atlas.microsoft.com/search/address/reverse/json",
                          params={"api-version": "1.0", "subscription-key": key, "query": f"{lat},{lng}"})
+    if r.status_code == 429:
+        await connector_health.note_quota_failure(
+            "maps", "Azure Maps reverse geocoding over quota (HTTP 429)", provider="azure")
     if r.status_code != 200:
         return None
     addresses = (r.json().get("addresses") or [])
@@ -326,6 +372,11 @@ async def _run(db, kind: str, *args) -> Optional[GeocodingResult]:
                 return result
         except Exception as exc:
             logger.warning("geocoder %s failed: %s", name, exc)
+            # Only the town's own provider earns a health flag. The OSM
+            # fallback is nobody's configured connector, and a Nominatim 429
+            # on the "maps" row would read as the town's key being exhausted.
+            if name == provider:
+                await connector_health.note_quota_failure("maps", exc, provider=provider)
     return None
 
 

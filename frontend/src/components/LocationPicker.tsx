@@ -90,6 +90,13 @@ export default function LocationPicker({
     const [isLocating, setIsLocating] = useState(false);
     const [isOutOfBounds, setIsOutOfBounds] = useState(false);
 
+    // A map that could not load used to replace this whole component with a red
+    // box -- no address field, so a resident hit by a rejected or capped key
+    // could not file a report at all, which is the opposite of failing
+    // gracefully. The canvas is the only part that goes; the address box stays
+    // and keeps resolving through the backend.
+    const mapUnavailable = !!error;
+
     // Sync input value with external value ONLY when address changes from parent
     useEffect(() => {
         if (value?.address !== undefined && value.address !== inputValue && value.address !== '') {
@@ -198,8 +205,17 @@ export default function LocationPicker({
 
     // Initialize the map
     useEffect(() => {
+        // The address box is wired to the backend geocoder before anything
+        // touches the provider SDK, so a key that is rejected, blocked or over
+        // its cap costs the resident the canvas and nothing else. The backend
+        // falls through to OpenStreetMap on its own side, which is why this
+        // still resolves addresses while the town's own provider is refusing
+        // calls. It is upgraded to the full chain once the map is up.
+        geocoderRef.current = backendGeocodingProvider;
+
         if (!hasMapCredential(config)) {
             setError('No map provider is configured yet.');
+            setNeedsOwnList(true);
             setIsLoading(false);
             return;
         }
@@ -458,6 +474,9 @@ export default function LocationPicker({
             } catch (err) {
                 if (isMounted) {
                     setError('Failed to load the map');
+                    // No provider widget attached, so this component's own
+                    // suggestion list is the only autocomplete left.
+                    setNeedsOwnList(true);
                     setIsLoading(false);
                 }
             }
@@ -526,6 +545,12 @@ export default function LocationPicker({
         // 2. User clicks on the map
         // 3. User drags the marker
         // 4. User uses "my location" button
+        //
+        // With no map, none of those four can happen: the typed text is all the
+        // resident can give, so it has to reach the form directly or a map
+        // failure swallows the location on submit. Coordinates go with it --
+        // the ones on screen belonged to the address that was just replaced.
+        if (mapUnavailable) onChange({ address: next, lat: null, lng: null });
         if (needsOwnList) requestSuggestions(next);
     };
 
@@ -609,15 +634,6 @@ export default function LocationPicker({
         }
     };
 
-    if (error) {
-        return (
-            <div className={`p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-center ${className}`}>
-                <MapPin className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p className="text-sm">{error}</p>
-            </div>
-        );
-    }
-
     return (
         <div className={`space-y-4 ${className}`}>
             {/* Address Input with Autocomplete */}
@@ -687,7 +703,18 @@ export default function LocationPicker({
                 )}
             </div>
 
-            {/* Map Container */}
+            {/* Map Container, or what is left when the provider will not draw
+                one. Same shape as the resident portal's no-provider fallback:
+                say the map is missing, keep the address field working. */}
+            {mapUnavailable ? (
+                <div
+                    className="p-4 rounded-xl bg-white/5 border border-white/10 text-center text-white/40"
+                    role="status"
+                >
+                    <MapPin className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">{error} You can still type the address above.</p>
+                </div>
+            ) : (
             <div className="relative rounded-2xl overflow-hidden border-2 border-white/10 shadow-xl">
                 {isLoading && (
                     <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 z-10">
@@ -703,6 +730,7 @@ export default function LocationPicker({
                     style={{ minHeight: '288px' }}
                 />
             </div>
+            )}
 
             {/* Out of bounds warning */}
             {isOutOfBounds && (
@@ -715,7 +743,7 @@ export default function LocationPicker({
             )}
 
             {/* Instructions or Selected location info - shown BELOW the map */}
-            {!value?.lat && !value?.lng && !isLoading ? (
+            {!value?.lat && !value?.lng && !isLoading && !mapUnavailable ? (
                 <div className="flex items-center justify-center gap-2 text-sm bg-white/5 rounded-xl px-4 py-3 border border-white/10">
                     <span className="text-primary-400">📍</span>
                     <span className="text-white/70">Tap the map to select a location, or search above</span>

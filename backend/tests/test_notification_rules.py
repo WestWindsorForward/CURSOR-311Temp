@@ -3,6 +3,7 @@ toggles + Assigned Only). Pure logic, no DB — proves the stored preferences ar
 actually applied at dispatch time."""
 
 from app.services.notification_rules import (
+    pick_recipient_group,
     should_notify_staff,
     wants_event_email,
     wants_event_sms,
@@ -97,3 +98,30 @@ def test_sms_off_by_default_even_with_module_on():
     _, send_sms = should_notify_staff(
         {}, "status_changes", is_assigned_to_me=True, sms_enabled_globally=True)
     assert send_sms is False
+
+
+# ---- recipient tiers ---------------------------------------------------------
+#
+# The live-site failure mode: every new request auto-routes to a department,
+# the department has no members, and there is no assignee — so recipients
+# resolved to nobody and the preference toggles were never consulted. The admin
+# tier is the floor that keeps them meaningful.
+
+def test_assignee_wins_over_everyone():
+    got = pick_recipient_group("assignee", ["dept-a", "dept-b"], ["admin"])
+    assert got == ["assignee"]
+
+
+def test_department_staff_when_no_assignee():
+    got = pick_recipient_group(None, ["dept-a", "dept-b"], ["admin"])
+    assert got == ["dept-a", "dept-b"]
+
+
+def test_admins_are_the_floor_when_department_is_empty():
+    # Routed department with zero members — the demo town's exact shape.
+    got = pick_recipient_group(None, [], ["admin1", "admin2"])
+    assert got == ["admin1", "admin2"]
+
+
+def test_nobody_at_all_is_an_empty_list_not_an_error():
+    assert pick_recipient_group(None, [], []) == []

@@ -148,8 +148,12 @@ export interface ServiceRequest {
     updated_datetime: string | null;
     source: string;
     flagged: boolean;
-    /** false = unlisted: hidden from public feeds/APIs (staff always see it). */
+    /** false = unlisted: hidden from public feeds/APIs (staff always see it).
+     *  The RESIDENT's choice, made at submission. Staff never write it. */
     is_public?: boolean;
+    /** true = staff took this off the public tracker and map. The report stays:
+     *  the tracking link works, staff see it, research exports include it. */
+    public_archived?: boolean;
     // Assignment
     assigned_department_id: number | null;
     assigned_to: string | null;
@@ -227,7 +231,7 @@ export interface RequestComment {
 export interface AuditLogEntry {
     id: number;
     service_request_id: number;
-    action: 'submitted' | 'status_change' | 'department_assigned' | 'staff_assigned' | 'comment_added' | 'legal_hold' | 'deleted' | 'restored' | 'priority_accepted';
+    action: 'submitted' | 'status_change' | 'department_assigned' | 'staff_assigned' | 'comment_added' | 'legal_hold' | 'public_archive' | 'deleted' | 'restored' | 'priority_accepted';
     old_value: string | null;
     new_value: string | null;
     actor_type: 'resident' | 'staff' | 'admin';
@@ -319,6 +323,10 @@ export interface SystemSettings {
     privacy_policy?: string | null;  // Custom privacy policy (Markdown)
     terms_of_service?: string | null;  // Custom terms of service (Markdown)
     accessibility_statement?: string | null;  // Custom accessibility statement
+    /** Days a CLOSED report stays on the public tracker and map. null means
+     *  everything stays listed. Applied at read time on the server, so changing
+     *  it is retroactive in both directions. */
+    public_archive_days?: number | null;
     updated_at: string | null;
 }
 

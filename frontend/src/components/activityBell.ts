@@ -12,6 +12,16 @@ import { ServiceRequest } from '../types';
  * `assigned_department_id` to be one of yours -- so a report that had just
  * arrived and had not been routed to any department yet counted for nobody.
  * The reports nobody has picked up are exactly the ones worth a bell.
+ *
+ * And a second gap, found live: most towns auto-route each service to a
+ * department (service_definitions.assigned_department_id), while their staff
+ * belong to no department at all -- the demo site is one admin with zero
+ * memberships. Every new report arrived pre-routed, the admin's department
+ * list was empty, and the bell stayed grey forever. The request list is
+ * already scoped server-side to what this user may see (admins: everything;
+ * staff: their departments + unrouted + assigned-to-them), so a user with no
+ * memberships must treat everything the server sent as theirs -- the same
+ * `noDeptScope` convention ActivityFeed already uses.
  */
 
 /** Anything older than this is not news; it is the backlog. */
@@ -23,6 +33,8 @@ export interface UnreadInput {
     readIds: Set<string>;
     /** Departments the signed-in user belongs to. */
     departmentIds: number[];
+    /** Signed-in username, so a report assigned to you by name always counts. */
+    username?: string | null;
     now: number;
 }
 
@@ -34,11 +46,14 @@ export function readKey(request: Pick<ServiceRequest, 'service_request_id'>): st
 /**
  * How many recent reports this user has not looked at.
  *
- * Yours means: routed to a department you are in, **or** not routed anywhere
- * yet. The second half is the fix -- an unrouted report is everybody's until
+ * Yours means: routed to a department you are in, assigned to you by name,
+ * **or** not routed anywhere yet -- an unrouted report is everybody's until
  * somebody claims it, and showing it to nobody is how it sits for a day.
+ * A user with no department memberships owns everything the server sent:
+ * the list endpoint already scoped it to what they may see, and re-filtering
+ * by an empty membership list is how the admin's bell never lit.
  */
-export function unreadCount({ requests, readIds, departmentIds, now }: UnreadInput): number {
+export function unreadCount({ requests, readIds, departmentIds, username, now }: UnreadInput): number {
     const mine = new Set(departmentIds);
     let count = 0;
 
@@ -56,7 +71,11 @@ export function unreadCount({ requests, readIds, departmentIds, now }: UnreadInp
         if (request.status === 'closed') continue;
 
         const dept = request.assigned_department_id;
-        const isMine = dept == null || mine.has(dept);
+        const isMine =
+            dept == null ||
+            mine.has(dept) ||
+            mine.size === 0 ||
+            (username != null && request.assigned_to === username);
         if (!isMine) continue;
 
         if (!readIds.has(readKey(request))) count++;

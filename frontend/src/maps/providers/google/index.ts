@@ -44,6 +44,22 @@ export const googleMapProvider: MapProviderFactory = {
      *
      * Chained rather than replaced, and put back by `stop()`. A hook left
      * behind would route every later failure into a check that has finished.
+     *
+     * Quota is the one failure this hook does not reliably see. Google fires
+     * `gm_authFailure` for key problems (InvalidKey, RefererNotAllowed,
+     * expired billing); an exhausted quota (OverQuotaMapError) instead logs to
+     * the console and paints Google's own "Sorry! Something went wrong"
+     * overlay inside the map div -- the page around it keeps working. That is
+     * an acceptable resident experience because LocationPicker's address box
+     * does not depend on the map canvas: its geocoder chain asks our backend
+     * first (see LocationPicker's chainGeocoders call), and the backend falls
+     * through to OpenStreetMap when Google is over quota. The *admin* flag for
+     * that state also comes from the backend: a project- or key-wide cap 429s
+     * the server-side geocoder too, which records it on the `maps` health row
+     * (geocode_dispatch + connector_health.note_quota_failure). Only a cap set
+     * on the Maps JavaScript API alone stays invisible to the server, and that
+     * is a limitation to know about, not one the browser can reliably report
+     * -- there is no documented hook for OverQuotaMapError.
      */
     watchAuthFailure() {
         type Host = { gm_authFailure?: (() => void) | undefined };
