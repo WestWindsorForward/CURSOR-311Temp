@@ -106,6 +106,22 @@ export interface PlanInput {
     redactionProvider: string;
     /** Feature ids ticked in the questionnaire. */
     wanted: ReadonlySet<string>;
+    /* Item ids to leave out even though the questionnaire cannot hide them.
+     *
+     * Sign-in and maps are added unconditionally below, because no town can
+     * take a report without both -- there is no tick for either, and there
+     * should not be. That is a statement about a town, and it is not true of
+     * every console that renders this plan: a hosting panel walks an operator
+     * through the credentials the HOST pays for, and a host that has decided
+     * its towns bring their own map key has no map credential to enter and no
+     * task to be shown.
+     *
+     * Optional, and absent everywhere in this application: nothing here passes
+     * it, so every plan built by a town's own console is unchanged. It is a
+     * hole left deliberately rather than a feature in use, so that the console
+     * with the extra question does not have to fork this arithmetic to ask it.
+     */
+    exclude?: ReadonlySet<string>;
 }
 
 /* Order is the order a town should work in, not the order the code was
@@ -144,7 +160,13 @@ export function buildPlan(input: PlanInput): PlanTask[] {
     const { cloud, idp, maps, wanted } = input;
     const want = (f: string) => wanted.has(f);
     const byVendor = new Map<Vendor, PlanItem[]>();
+    /* Filtered on the way in rather than on the way out, so a task whose only
+     * item was excluded is never assembled at all. Dropping items afterwards
+     * would leave an empty vendor task with a title and a foundation walk and
+     * nothing to do inside it -- which is exactly the dead end the exclusion
+     * exists to remove. */
     const add = (vendor: Vendor, item: PlanItem) => {
+        if (input.exclude?.has(item.id)) return;
         const list = byVendor.get(vendor) ?? [];
         list.push(item);
         byVendor.set(vendor, list);
