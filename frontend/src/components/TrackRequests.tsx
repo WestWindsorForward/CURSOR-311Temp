@@ -16,7 +16,6 @@ import {
     Check,
     ExternalLink,
     User,
-    X,
     Star,
     Users,
     UserCircle,
@@ -27,6 +26,7 @@ import { PublicServiceRequest, RequestComment, AuditLogEntry } from '../types';
 import { TranslatedContent } from './TranslatedContent';
 import { CommentCard, CommentEmptyState, CommentSkeleton } from './commentUI';
 import RequestDetailMap from './RequestDetailMap';
+import PhotoLightbox from './PhotoLightbox';
 import { RawMapsConfig, mapProviderReady, resolveMapProviderConfig } from '../maps';
 
 type StatusFilter = 'all' | 'open' | 'in_progress' | 'closed';
@@ -585,12 +585,12 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                                         type="button"
                                         onClick={() => openLightbox(selectedRequest.completion_photo_url!)}
                                         aria-label="View completion photo full size"
-                                        className="block w-fit"
+                                        className="block w-fit mt-3"
                                     >
                                         <img
                                             src={selectedRequest.completion_photo_url}
                                             alt="Completion photo"
-                                            className="mt-3 rounded-lg max-h-48 object-contain cursor-pointer hover:opacity-90 transition-opacity"
+                                            className="rounded-lg max-h-48 object-contain cursor-pointer hover:opacity-90 transition-opacity"
                                         />
                                     </button>
                                 )}
@@ -755,48 +755,7 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                 </Card>
 
                 {/* Premium Photo Lightbox Modal */}
-                {lightboxUrl && (
-                    <div
-                        className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-8"
-                        onClick={closeLightbox}
-                        role="dialog"
-                        aria-label="Photo preview"
-                    >
-                        {/* Backdrop with blur */}
-                        <div className="absolute inset-0 bg-black/95 backdrop-blur-xl" />
-
-                        {/* Close button */}
-                        <button
-                            autoFocus
-                            onClick={closeLightbox}
-                            className="absolute top-4 right-4 md:top-6 md:right-6 z-20 p-2 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 transition-all duration-300 group"
-                            aria-label="Close image preview"
-                        >
-                            <X className="w-6 h-6 text-white group-hover:rotate-90 transition-transform duration-300" aria-hidden="true" />
-                        </button>
-
-                        {/* Image container with premium styling */}
-                        <div
-                            className="relative z-10 max-w-[90vw] max-h-[85vh] rounded-2xl overflow-hidden shadow-2xl ring-1 ring-white/20"
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            {/* Gradient glow effect behind image */}
-                            <div className="absolute -inset-1 bg-gradient-to-r from-primary-500/30 via-purple-500/30 to-primary-500/30 blur-xl opacity-50" />
-
-                            {/* Image */}
-                            <img
-                                src={lightboxUrl}
-                                alt="Full size preview"
-                                className="relative max-w-full max-h-[85vh] object-contain bg-gray-900/50 rounded-2xl"
-                            />
-                        </div>
-
-                        {/* Instructions */}
-                        <p className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/50 text-sm">
-                            Press Escape or click anywhere to close
-                        </p>
-                    </div>
-                )}
+                {lightboxUrl && <PhotoLightbox url={lightboxUrl} onClose={closeLightbox} />}
             </motion.div>
         );
     }
@@ -928,7 +887,11 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
 
             {/* Status Filter Tabs - Grid layout to fit all buttons */}
             <div className="mb-4">
-                <div className="grid grid-cols-4 gap-1.5 md:flex md:gap-2 md:flex-wrap">
+                <div
+                    role="group"
+                    aria-label="Filter by status"
+                    className="grid grid-cols-4 gap-1.5 md:flex md:gap-2 md:flex-wrap"
+                >
                     {([
                         { key: 'all', label: 'All Requests', mobileLabel: 'All' },
                         { key: 'open', label: 'Open', mobileLabel: 'Open' },
@@ -1038,48 +1001,7 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
             )}
 
             {/* Premium Photo Lightbox Modal */}
-            {lightboxUrl && (
-                <div
-                    className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-8"
-                    onClick={closeLightbox}
-                    role="dialog"
-                    aria-label="Photo preview"
-                >
-                    {/* Backdrop with blur */}
-                    <div className="absolute inset-0 bg-black/95 backdrop-blur-xl" />
-
-                    {/* Close button */}
-                    <button
-                        autoFocus
-                        onClick={closeLightbox}
-                        className="absolute top-4 right-4 md:top-6 md:right-6 z-20 p-2 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 transition-all duration-300 group"
-                        aria-label="Close image preview"
-                    >
-                        <X className="w-6 h-6 text-white group-hover:rotate-90 transition-transform duration-300" aria-hidden="true" />
-                    </button>
-
-                    {/* Image container with premium styling */}
-                    <div
-                        className="relative z-10 max-w-[90vw] max-h-[85vh] rounded-2xl overflow-hidden shadow-2xl ring-1 ring-white/20"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        {/* Gradient glow effect behind image */}
-                        <div className="absolute -inset-1 bg-gradient-to-r from-primary-500/30 via-purple-500/30 to-primary-500/30 blur-xl opacity-50" />
-
-                        {/* Image */}
-                        <img
-                            src={lightboxUrl}
-                            alt="Full size preview"
-                            className="relative max-w-full max-h-[85vh] object-contain bg-gray-900/50 rounded-2xl"
-                        />
-                    </div>
-
-                    {/* Instructions */}
-                    <p className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/50 text-sm">
-                        Press Escape or click anywhere to close
-                    </p>
-                </div>
-            )}
+            {lightboxUrl && <PhotoLightbox url={lightboxUrl} onClose={closeLightbox} />}
         </div>
     );
 }

@@ -42,8 +42,21 @@ export default function PhotoUpload({ previewUrls, onAdd, onRemove, maxPhotos = 
     useEffect(() => {
         if (pendingFocus.current === null) return;
         if (pendingFocus.current === 'after-add') {
-            if (atCap) removeRefs.current[count - 1]?.focus();
-            // otherwise the trigger survived and keeps focus on its own
+            // A multi-file selection arrives one preview at a time (each
+            // FileReader resolves separately), so the count climbs 0 -> 1 ->
+            // 2 -> 3 and this effect runs on every step. The add is only
+            // "settled" for focus purposes once the trigger is gone: consume
+            // the pending move at the cap, and until then leave it armed --
+            // clearing it at the first step would let the trigger unmount a
+            // tick later with nothing to catch the focus it was holding.
+            if (atCap) {
+                removeRefs.current[count - 1]?.focus();
+            } else {
+                // The trigger survived, so it keeps focus on its own -- unless
+                // something in the batch dropped it, in which case put it back.
+                if (document.activeElement === document.body) triggerRef.current?.focus();
+                return;
+            }
         } else {
             const target = triggerRef.current ?? removeRefs.current[Math.min(pendingFocus.current, count - 1)];
             target?.focus();

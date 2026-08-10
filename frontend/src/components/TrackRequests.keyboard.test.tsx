@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 /**
@@ -88,10 +88,12 @@ describe('TrackRequests keyboard access', () => {
         const first = await cardFor(/Pothole.*status Resolved/);
         const second = await cardFor(/Streetlight Out.*status Open/);
 
-        // jsdom applies no responsive CSS, so the filter's accessible name
-        // includes both its desktop and mobile labels; the first /Resolved/
-        // button in DOM order is the filter tab.
-        screen.getAllByRole('button', { name: /resolved/i })[0].focus();
+        // The stat tiles carry a "Resolved" label too, so the filter is found
+        // by scoping to the filter group rather than by DOM order. jsdom
+        // applies no responsive CSS, so the name holds both the desktop and
+        // the mobile label ("Resolved Done").
+        const filters = screen.getByRole('group', { name: /filter by status/i });
+        within(filters).getByRole('button', { name: /resolved/i }).focus();
 
         // Between the filters and the list sit the three stat tiles; the
         // cards must come next rather than being skipped for the footer.
@@ -170,5 +172,31 @@ describe('TrackRequests keyboard access', () => {
         expect(screen.queryByRole('dialog', { name: /photo preview/i })).toBeNull();
         // Focus returns to the thumbnail that opened it.
         expect(document.activeElement).toBe(thumb);
+    });
+
+    it('holds Tab inside the lightbox, which covers the page behind it', async () => {
+        // The overlay is opaque: without containment, Tab walks onto a page
+        // nobody can see and focus disappears behind the black.
+        const user = userEvent.setup();
+        render(<TrackRequests />);
+
+        (await cardFor(/Pothole.*status Resolved/)).focus();
+        await user.keyboard('{Enter}');
+        await screen.findByRole('heading', { name: 'Pothole', level: 1 });
+        (await screen.findByRole('button', { name: /view submitted photo 1/i })).focus();
+        await user.keyboard('{Enter}');
+
+        const dialog = await screen.findByRole('dialog', { name: /photo preview/i });
+        expect(dialog.getAttribute('aria-modal')).toBe('true');
+
+        const close = screen.getByRole('button', { name: /close image preview/i });
+        expect(document.activeElement).toBe(close);
+
+        await user.tab();
+        expect(document.activeElement).toBe(close);
+        expect(dialog.contains(document.activeElement)).toBe(true);
+
+        await user.tab({ shift: true });
+        expect(document.activeElement).toBe(close);
     });
 });

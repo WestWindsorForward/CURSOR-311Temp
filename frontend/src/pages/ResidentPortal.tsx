@@ -1246,9 +1246,13 @@ export default function ResidentPortal() {
                                                     inputMode="tel"
                                                     placeholder="(555) 123-4567"
                                                     value={formData.phone}
-                                                    onChange={(e) =>
-                                                        setFormData((prev) => ({ ...prev, phone: filterPhoneInput(e.target.value) }))
-                                                    }
+                                                    onChange={(e) => {
+                                                        setFormData((prev) => ({ ...prev, phone: filterPhoneInput(e.target.value) }));
+                                                        // A field that keeps showing "invalid" while it is
+                                                        // being corrected reads as unfixable; the error
+                                                        // comes back at submit if it is still wrong.
+                                                        setFormErrors((prev) => (prev.phone ? { ...prev, phone: '' } : prev));
+                                                    }}
                                                     error={formErrors.phone}
                                                 />
                                             </div>
