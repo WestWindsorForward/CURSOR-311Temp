@@ -147,12 +147,18 @@ def _normalise(raw) -> List[str]:
     return sorted({k for k in raw if isinstance(k, str) and k})
 
 
-async def host_provided(db) -> List[str]:
-    """Which keys are currently the host's, sorted. Never raises."""
+async def host_provided(db, *, fresh: bool = False) -> List[str]:
+    """Which keys are currently the host's, sorted. Never raises.
+
+    `fresh=True` re-reads the row from the database rather than accepting the
+    copy this session already holds -- see `get_settings`. Callers deciding
+    something DURING a push need it, because `apply` commits key by key and a
+    town admin's save can commit in between.
+    """
     from app.services.system_settings import get_settings
 
     try:
-        row = await get_settings(db)
+        row = await get_settings(db, fresh=fresh)
     except Exception:
         logger.warning("Could not read host-provided credential ownership")
         return []
@@ -345,8 +351,6 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
         if isinstance(k, str) and str(k).strip()
     }
     allowed = shareable_keys()
-    previously: List[str] = await host_provided(db)
-    owned = set(previously)
 
     accepted: List[str] = []
     refused: List[str] = []
@@ -400,7 +404,24 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
             # out entirely).
             refused.append(key)
             continue
-        if key not in owned:
+        # Ownership is read again for EVERY key, and it is read fresh.
+        #
+        # A single snapshot taken before the loop is a lie by the second key.
+        # `_persist_secret` commits as it goes, so this loop spans many
+        # committed transactions and several seconds of vault round trips, and
+        # a town admin saving their own credential in that window calls
+        # `forget`, which commits too. Against a snapshot the loop never sees
+        # it: it reaches the clerk's key, finds it in the ownership set it read
+        # before the push started, skips the "does the town already have one"
+        # guard entirely, and overwrites the value the clerk typed seconds ago
+        # with the host's. That is the exact outcome this whole module exists
+        # to make impossible, and it survived the first fix because that one
+        # only handled a `forget` landing after its key had been written.
+        #
+        # Reading per key costs one SELECT against a row already in cache, next
+        # to a vault write per key. It is not a price worth optimising.
+        owned_now = set(await host_provided(db, fresh=True))
+        if key not in owned_now:
             try:
                 taken = await _is_configured(db, key)
             except Exception:
@@ -432,11 +453,13 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
         except Exception:
             logger.warning("Could not store a host-provided credential")
             refused.append(key)
-            if key not in previously:
+            if key not in owned_now:
                 # New key, nothing of the host's behind it: releasing the claim
                 # leaves the row exactly as it was. A key the host ALREADY
                 # owned keeps its claim -- see `unclaim` above for what
-                # dropping it cost.
+                # dropping it cost. Judged against the same fresh read the
+                # guard used, so a key a clerk took back moments ago is treated
+                # as theirs by both halves of this branch.
                 unclaim.append(key)
             continue
         if not stored_externally:
@@ -463,7 +486,13 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
     # blank, the vault errored -- and none of those is the host saying "stop
     # sharing this". Revocation has exactly one spelling in a full replace, and
     # it is absence from the payload. A refused key is present, so it stays.
-    for key in sorted(owned - set(incoming)):
+    # Fresh again, and for the same reason. Revoking against the snapshot taken
+    # before the loop would withdraw a credential a clerk claimed while the
+    # push was running -- deleting, from vault and database both, a value the
+    # town entered on purpose and now owns. Withdrawal may only ever apply to
+    # keys that are still the host's at the moment it happens.
+    still_owned = set(await host_provided(db, fresh=True))
+    for key in sorted(still_owned - set(incoming)):
         if key not in allowed:
             logger.warning(
                 "Keeping a host-provided credential that is no longer shareable "

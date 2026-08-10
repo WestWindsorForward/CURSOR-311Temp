@@ -584,6 +584,47 @@ def test_a_key_claimed_by_the_town_mid_push_is_not_handed_back(town):
     assert ANOTHER in host_secrets._normalise(town.row.host_provided_keys)
 
 
+def test_a_key_the_town_claims_before_its_turn_is_refused_not_overwritten(town):
+    """The other ordering, and the one a single pre-loop snapshot cannot see.
+
+    `apply` commits key by key, so the loop spans several committed
+    transactions. A clerk who saves their own credential during the FIRST key's
+    vault write has already committed `forget` by the time the loop reaches the
+    second -- and against a snapshot taken before the push started, the second
+    key still looks like the host's. The ownership guard is skipped on that
+    basis, and the host's value is written over a credential a clerk typed
+    seconds earlier.
+
+    ANOTHER sorts first, so the clerk's save lands during ANOTHER's write and
+    A_KEY's turn comes afterwards. That is the reviewer's reproduction, and it
+    is why ownership is re-read for every key rather than once."""
+    _run(host_secrets.apply(town.db, {A_KEY: VALUE, ANOTHER: "translator-0002"}))
+    assert town.row.host_provided_keys == [ANOTHER, A_KEY]
+
+    async def the_clerk_saves_their_own(key_name):
+        if key_name != ANOTHER:
+            return
+        # Exactly what a town-side save does, from the clerk's own session:
+        # the value goes in, and `forget` takes the key off the host.
+        town.store.values[A_KEY] = "the-towns-own-key"
+        town.row.host_provided_keys = [
+            k for k in host_secrets._normalise(town.row.host_provided_keys)
+            if k != A_KEY
+        ]
+
+    town.store.on_persist = the_clerk_saves_their_own
+
+    result = _run(host_secrets.apply(town.db, {A_KEY: VALUE, ANOTHER: "translator-0002"}))
+
+    # The town's own credential wins, however the timing falls.
+    assert result["refused"] == [A_KEY]
+    assert town.store.values[A_KEY] == "the-towns-own-key"
+    assert A_KEY not in host_secrets._normalise(town.row.host_provided_keys)
+    # And it is not revoked either: it is the town's now, not a withdrawal.
+    assert result["revoked"] == []
+    assert A_KEY not in town.store.deleted
+
+
 def test_a_write_the_external_store_would_not_take_is_reported(town):
     """`_persist_secret` returns whether the EXTERNAL store took the value.
     False means it landed only in the encrypted database copy, which is a
@@ -1069,6 +1110,104 @@ def test_a_push_lands_before_the_town_has_chosen_a_secret_store(town, monkeypatc
     assert written.key_value != VALUE
     assert decrypt(written.key_value) == VALUE
     assert town.row.host_provided_keys == [A_KEY]
+    # And NOT flagged as a write that only reached the database. There is no
+    # external store to have rejected it -- see the test below.
+    assert result["db_only"] == []
+
+
+@pytest.mark.parametrize("provider", ["database", ""])
+def test_a_town_with_no_external_store_is_not_told_its_keys_are_db_only(
+    town, monkeypatch, provider
+):
+    """`db_only` has to mean something, and on the default deployment it did not.
+
+    `set_secret` returns False for every key when the chosen store IS the
+    encrypted database, by design rather than by failure -- there is nothing
+    outside the database to write to. Reported as db-only, that made an
+    ordinary save on an ordinary town look like a credential about to vanish,
+    on every key, forever; and the endpoint's own documentation told the host
+    exactly that. An alarm that fires on the default configuration is one
+    nobody can act on, which costs the real signal it was added to carry.
+
+    Both external-less states are the same answer: "database" is a deliberate
+    choice, "" is a town that has not chosen yet and whose values land in the
+    database on purpose until it does."""
+    from app.services import secret_manager
+
+    if provider:
+        monkeypatch.setenv("SECRETS_PROVIDER", provider)
+    else:
+        monkeypatch.delenv("SECRETS_PROVIDER", raising=False)
+    monkeypatch.setitem(secret_manager._config, "use_gcp", False)
+
+    class Result:
+        def scalar_one_or_none(self):
+            return None
+
+    class DB:
+        def __init__(self):
+            self.added = []
+
+        async def execute(self, _stmt):
+            return Result()
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        async def commit(self):
+            pass
+
+    monkeypatch.setattr(system, "_persist_secret", _REAL_PERSIST_SECRET)
+
+    result = _run(host_secrets.apply(DB(), {A_KEY: VALUE}))
+
+    assert result["accepted"] == [A_KEY]
+    assert result["db_only"] == []
+    assert secret_manager.external_store_configured() is False
+
+
+def test_an_external_store_that_refuses_the_write_is_still_reported(town, monkeypatch):
+    """The other side of the same coin: the signal must survive the fix.
+
+    With a real external store configured, a False from `set_secret` is what it
+    always was -- the store would not take it, the credential is living in the
+    database copy alone, and it goes away when that copy is swept. That is the
+    ordering trap the flag exists for, and narrowing db_only must not have
+    silenced it."""
+    from app.services import secret_manager
+
+    monkeypatch.setenv("SECRETS_PROVIDER", "azure")
+
+    async def refuse(_key, _value):
+        return False
+
+    monkeypatch.setattr(secret_manager, "set_secret", refuse)
+    monkeypatch.setattr("app.services.secret_manager.set_secret", refuse)
+
+    class Result:
+        def scalar_one_or_none(self):
+            return None
+
+    class DB:
+        def __init__(self):
+            self.added = []
+
+        async def execute(self, _stmt):
+            return Result()
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        async def commit(self):
+            pass
+
+    monkeypatch.setattr(system, "_persist_secret", _REAL_PERSIST_SECRET)
+
+    result = _run(host_secrets.apply(DB(), {A_KEY: VALUE}))
+
+    assert secret_manager.external_store_configured() is True
+    assert result["accepted"] == [A_KEY]
+    assert result["db_only"] == [A_KEY]
 
 
 def test_the_column_has_the_belt_and_braces_guard_too():
@@ -1096,12 +1235,27 @@ def test_the_declared_schema_floor_matches_the_migration_it_ships():
     """MIN_DB_REVISION is the oldest schema this image can start against, and
     the orchestrator refuses an upgrade outside [min .. head].
 
-    The rule in the file is: additive migration, leave it at the PREVIOUS head.
-    The host-provided-keys migration is a single nullable ADD COLUMN, so the
-    floor is the revision immediately before it. It had been left fourteen
-    revisions back, across several contract migrations this build genuinely
-    cannot run against, which is the unsafe direction: it lets an image reach a
-    town whose schema it cannot serve, rather than merely blocking a rollout."""
+    The consuming gate is SET MEMBERSHIP, not a range: centralizedhosting's
+    rollout._precheck_compatibility refuses unless the town's observed revision
+    is exactly `min_db_revision` or exactly `db_revision`. So there are only
+    ever two legal declarations, and which one is correct depends on the head
+    migration:
+
+      * ADDITIVE (expand) -- the previous head. The new build still runs on the
+        old schema, so a town can be started on the new image and migrated
+        after, with no window where code and schema disagree.
+      * DESTRUCTIVE (contract) -- head itself. The new build cannot run on the
+        old schema, so the orchestrator has to see the town already migrated.
+
+    This asserts the rule rather than one side of it. An earlier version
+    demanded the previous head unconditionally, which is right for the
+    migration shipping today and would have pressured whoever writes the next
+    contract migration into declaring a floor their build cannot honour.
+
+    The value had been left fourteen revisions back, across several contract
+    migrations this build genuinely cannot start against -- the unsafe
+    direction, since it lets an image reach a town whose schema it cannot
+    serve, where naming a too-new revision merely blocks a rollout."""
     pytest.importorskip("alembic.script")
     from pathlib import Path
 
@@ -1123,10 +1277,30 @@ def test_the_declared_schema_floor_matches_the_migration_it_ships():
     heads = script.get_heads()
     assert len(heads) == 1, f"expected one head, got {sorted(heads)}"
 
-    previous = script.get_revision(heads[0]).down_revision
-    assert declared == previous, (
-        f"MIN_DB_REVISION says {declared}, but the revision before head is {previous}"
+    head = heads[0]
+    previous = script.get_revision(head).down_revision
+
+    # The gate only ever accepts one of these two.
+    assert declared in {head, previous}, (
+        f"MIN_DB_REVISION says {declared}, which is neither head ({head}) nor "
+        f"the revision before it ({previous}). The orchestrator's compatibility "
+        f"check is set membership on exactly those two."
     )
+
+    # And which of the two, by the head migration's own shape.
+    from app.db.migrate import ADDITIVE, classify_source, revision_sources
+
+    _path, head_source = revision_sources()[head]
+    if classify_source(head_source) == ADDITIVE:
+        assert declared == previous, (
+            f"head {head} is additive, so the build runs on the old schema and "
+            f"MIN_DB_REVISION should be {previous}, not {declared}"
+        )
+    else:
+        assert declared == head, (
+            f"head {head} is destructive, so the build cannot run on the old "
+            f"schema and MIN_DB_REVISION must be {head}, not {declared}"
+        )
 
 
 def test_the_guard_read_asks_the_database_rather_than_the_identity_map():
