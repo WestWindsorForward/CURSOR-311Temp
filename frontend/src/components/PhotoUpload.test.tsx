@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import React from 'react';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import PhotoUpload from './PhotoUpload';
 
@@ -18,6 +18,17 @@ import PhotoUpload from './PhotoUpload';
 afterEach(cleanup);
 
 const noop = () => { };
+
+/**
+ * Deliver a multi-file selection the way the real flow does: the resident
+ * activates the trigger, the trigger clicks the hidden input for them, and
+ * focus is still on the trigger when the files arrive. user.upload() would
+ * focus the input element itself, which no resident ever does.
+ */
+const chooseFiles = (input: HTMLInputElement, files: File[]) => {
+    Object.defineProperty(input, 'files', { value: files, configurable: true, writable: true });
+    fireEvent.change(input);
+};
 
 describe('PhotoUpload keyboard access', () => {
     it('puts the add-photos trigger in the tab order', async () => {
@@ -115,6 +126,76 @@ describe('PhotoUpload keyboard access', () => {
         await user.keyboard('{Enter}');
 
         expect(document.activeElement).not.toBe(document.body);
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: /add photos/i }));
+    });
+
+    it('lands focus on a surviving control when a multi-file selection fills the cap', async () => {
+        // The repro: Tab to "Add Photos", Enter, pick three images at once.
+        // Each preview arrives from its own FileReader callback, so the count
+        // climbs 0 -> 1 -> 2 -> 3 in separate renders and the trigger unmounts
+        // only on the last one -- focus must not be spent on the first.
+        const user = userEvent.setup();
+        function Harness() {
+            const [urls, setUrls] = React.useState<string[]>([]);
+            return (
+                <PhotoUpload
+                    previewUrls={urls}
+                    onAdd={(files) => {
+                        Array.from(files).forEach((file, i) => {
+                            // One state update per file, each in its own task
+                            // and so its own render, the way separate
+                            // FileReader.onloadend callbacks deliver them.
+                            setTimeout(() => setUrls(prev => [...prev, `data:${file.name}-${i}`]), (i + 1) * 5);
+                        });
+                    }}
+                    onRemove={(i) => setUrls(prev => prev.filter((_, j) => j !== i))}
+                />
+            );
+        }
+        const { container } = render(<Harness />);
+
+        const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+        await user.tab();
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: /add photos/i }));
+        chooseFiles(input, [
+            new File(['a'], 'a.png', { type: 'image/png' }),
+            new File(['b'], 'b.png', { type: 'image/png' }),
+            new File(['c'], 'c.png', { type: 'image/png' }),
+        ]);
+
+        await screen.findByRole('button', { name: 'Remove photo 3' });
+        expect(screen.queryByRole('button', { name: /add photos/i })).toBeNull();
+        expect(document.activeElement).not.toBe(document.body);
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove photo 3' }));
+    });
+
+    it('leaves focus on the trigger when a multi-file selection stays under the cap', async () => {
+        const user = userEvent.setup();
+        function Harness() {
+            const [urls, setUrls] = React.useState<string[]>([]);
+            return (
+                <PhotoUpload
+                    previewUrls={urls}
+                    onAdd={(files) => {
+                        Array.from(files).forEach((file, i) => {
+                            setTimeout(() => setUrls(prev => [...prev, `data:${file.name}-${i}`]), (i + 1) * 5);
+                        });
+                    }}
+                    onRemove={noop}
+                />
+            );
+        }
+        const { container } = render(<Harness />);
+
+        const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+        await user.tab();
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: /add photos/i }));
+        chooseFiles(input, [
+            new File(['a'], 'a.png', { type: 'image/png' }),
+            new File(['b'], 'b.png', { type: 'image/png' }),
+        ]);
+
+        await screen.findByRole('button', { name: 'Remove photo 2' });
         expect(document.activeElement).toBe(screen.getByRole('button', { name: /add photos/i }));
     });
 

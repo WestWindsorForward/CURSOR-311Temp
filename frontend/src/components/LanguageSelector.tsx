@@ -148,14 +148,19 @@ export default function LanguageSelector() {
     }, [isOpen]);
 
     const changeLanguage = (code: string) => {
+        // Picking a language unmounts the button that was focused, so focus
+        // goes back to the trigger -- the same place Escape leaves it, rather
+        // than dropping to <body> and restarting Tab from the top of the page.
         if (code === language) {
             setIsOpen(false);
             setSearchQuery('');
+            triggerRef.current?.focus();
             return;
         }
         setLanguage(code);
         setIsOpen(false);
         setSearchQuery('');
+        triggerRef.current?.focus();
         // Refresh the page to apply translations cleanly
         setTimeout(() => {
             window.location.reload();
@@ -169,7 +174,13 @@ export default function LanguageSelector() {
                 onClick={() => setIsOpen(!isOpen)}
                 className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 transition-all text-white shadow-lg"
                 aria-label={`Select language, currently ${currentLanguage.name}`}
-                aria-haspopup="listbox"
+                // Not "listbox": the popup is a search field plus ordinary
+                // buttons, and claiming a listbox that has no options makes a
+                // screen reader announce a control the user cannot find. The
+                // honest claim is that a popup opens; the buttons inside are
+                // announced as buttons, which is what they are, and the
+                // current language carries aria-current.
+                aria-haspopup="true"
                 aria-expanded={isOpen}
             >
                 <Globe className="w-4 h-4 flex-shrink-0" />
@@ -232,6 +243,9 @@ export default function LanguageSelector() {
                                         <button
                                             key={lang.code}
                                             onClick={() => changeLanguage(lang.code)}
+                                            // The check mark is the only sighted
+                                            // marker of the active language.
+                                            aria-current={language === lang.code ? 'true' : undefined}
                                             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-left ${language === lang.code
                                                 ? 'bg-primary-500/30 text-white border border-primary-400/30'
                                                 : 'text-white/80 hover:bg-white/10 hover:text-white'
