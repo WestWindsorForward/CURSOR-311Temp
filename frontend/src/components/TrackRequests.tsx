@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'framer-motion';
 import {
     MapPin,
@@ -138,6 +138,30 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
             loadAuditLog(selectedRequest.service_request_id);
         }
     }, [selectedRequest]);
+
+    // The lightbox is opened from a button, so a keyboard user is inside it
+    // the moment it appears -- Escape has to be a way back out, and closing
+    // has to put focus back on the thumbnail that opened it rather than
+    // dropping it to <body> and restarting Tab from the top of the page.
+    const lightboxTrigger = useRef<HTMLElement | null>(null);
+    const openLightbox = (url: string) => {
+        lightboxTrigger.current = document.activeElement instanceof HTMLElement
+            ? document.activeElement : null;
+        setLightboxUrl(url);
+    };
+    const closeLightbox = () => {
+        setLightboxUrl(null);
+        lightboxTrigger.current?.focus();
+        lightboxTrigger.current = null;
+    };
+    useEffect(() => {
+        if (!lightboxUrl) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') closeLightbox();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [lightboxUrl]);
 
     // Sync internal state with parent-controlled selectedRequestId (for back/forward navigation)
     useEffect(() => {
@@ -553,12 +577,22 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                                     <p className="text-white/60 text-sm mt-2">{selectedRequest.completion_message}</p>
                                 )}
                                 {selectedRequest.completion_photo_url && (
-                                    <img
-                                        src={selectedRequest.completion_photo_url}
-                                        alt="Completion photo"
-                                        className="mt-3 rounded-lg max-h-48 object-contain cursor-pointer hover:opacity-90 transition-opacity"
-                                        onClick={() => selectedRequest.completion_photo_url && window.open(selectedRequest.completion_photo_url, '_blank')}
-                                    />
+                                    /* A button opening the in-page lightbox, not an onClick on
+                                       the <img>: an image with a click handler is invisible to
+                                       the keyboard, and the lightbox is how every other photo
+                                       on this page enlarges. */
+                                    <button
+                                        type="button"
+                                        onClick={() => openLightbox(selectedRequest.completion_photo_url!)}
+                                        aria-label="View completion photo full size"
+                                        className="block w-fit"
+                                    >
+                                        <img
+                                            src={selectedRequest.completion_photo_url}
+                                            alt="Completion photo"
+                                            className="mt-3 rounded-lg max-h-48 object-contain cursor-pointer hover:opacity-90 transition-opacity"
+                                        />
+                                    </button>
                                 )}
                             </div>
                         )}
@@ -575,10 +609,12 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                             </h3>
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                 {selectedRequest.media_urls.map((url, index) => (
-                                    <div
+                                    <button
                                         key={index}
-                                        onClick={() => setLightboxUrl(url)}
-                                        className="block group cursor-pointer"
+                                        type="button"
+                                        onClick={() => openLightbox(url)}
+                                        className="block group cursor-pointer text-left w-full"
+                                        aria-label={`View submitted photo ${index + 1} full size`}
                                     >
                                         <div className="relative overflow-hidden rounded-xl aspect-square">
                                             <img
@@ -590,7 +626,7 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                                                 <ExternalLink className="w-8 h-8 text-white" />
                                             </div>
                                         </div>
-                                    </div>
+                                    </button>
                                 ))}
                             </div>
                         </Card>
@@ -652,6 +688,11 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                     {/* Add Comment */}
                     <div className="mb-6 p-4 rounded-xl bg-white/5 border border-white/10">
                         <Textarea
+                            // A placeholder is not an accessible name: it is
+                            // gone the moment they start typing, and a screen
+                            // reader landing here mid-form otherwise hears
+                            // only "edit, blank".
+                            aria-label="Add a comment to this request"
                             placeholder={"Share your thoughts or updates..."}
                             value={newComment}
                             onChange={(e) => {
@@ -717,14 +758,17 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                 {lightboxUrl && (
                     <div
                         className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-8"
-                        onClick={() => setLightboxUrl(null)}
+                        onClick={closeLightbox}
+                        role="dialog"
+                        aria-label="Photo preview"
                     >
                         {/* Backdrop with blur */}
                         <div className="absolute inset-0 bg-black/95 backdrop-blur-xl" />
 
                         {/* Close button */}
                         <button
-                            onClick={() => setLightboxUrl(null)}
+                            autoFocus
+                            onClick={closeLightbox}
                             className="absolute top-4 right-4 md:top-6 md:right-6 z-20 p-2 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 transition-all duration-300 group"
                             aria-label="Close image preview"
                         >
@@ -749,7 +793,7 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
 
                         {/* Instructions */}
                         <p className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/50 text-sm">
-                            Click anywhere to close
+                            Press Escape or click anywhere to close
                         </p>
                     </div>
                 )}
@@ -764,16 +808,39 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
     // Shared card renderer
     const renderRequestCard = (request: PublicServiceRequest, index: number, isMine: boolean) => {
         const status = statusColors[request.status] || statusColors.open;
+        // The click handler lives on the Card, not the animation wrapper:
+        // Card is what carries role="button", tabIndex and the Enter/Space
+        // handler, so a handler on the outer div was mouse-only and the whole
+        // list vanished from the tab order.
+        // Everything the card shows has to be in this one string: role="button"
+        // makes descendant content presentational, so a screen reader can no
+        // longer reach the description, the photo count, or the request ID by
+        // arrowing into the card -- and the ID is what the search box above
+        // asks people to search by.
+        const accessibleName = [
+            request.service_name,
+            request.address ? `at ${request.address}` : null,
+            `status ${status.label}`,
+            request.requested_datetime ? `opened ${formatShortDate(request.requested_datetime)}` : null,
+            isMine ? 'submitted by you' : null,
+            request.description,
+            (request.photo_count || 0) > 0
+                ? `${request.photo_count} ${request.photo_count !== 1 ? 'photos' : 'photo'}`
+                : null,
+            `request ${request.service_request_id}`,
+        ].filter(Boolean).join(', ');
         return (
             <motion.div
                 key={request.service_request_id}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: Math.min(index * 0.01, 0.2) }}
-                onClick={() => handleSelectRequest(request)}
-                className="cursor-pointer group"
+                className="group"
             >
-                <Card className={`p-5 hover:ring-2 transition-all group-hover:bg-white/[0.03] ${
+                <Card
+                    onClick={() => handleSelectRequest(request)}
+                    aria-label={accessibleName}
+                    className={`p-5 hover:ring-2 transition-all group-hover:bg-white/[0.03] ${
                     isMine
                         ? 'hover:ring-purple-500/50 border-purple-500/20'
                         : 'hover:ring-primary-500/50'
@@ -850,6 +917,7 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
                 <div className="relative">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/40" />
                     <Input
+                        aria-label="Search requests by ID, category, or address"
                         placeholder={"Search by ID, category, or address..."}
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
@@ -973,14 +1041,17 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
             {lightboxUrl && (
                 <div
                     className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-8"
-                    onClick={() => setLightboxUrl(null)}
+                    onClick={closeLightbox}
+                    role="dialog"
+                    aria-label="Photo preview"
                 >
                     {/* Backdrop with blur */}
                     <div className="absolute inset-0 bg-black/95 backdrop-blur-xl" />
 
                     {/* Close button */}
                     <button
-                        onClick={() => setLightboxUrl(null)}
+                        autoFocus
+                        onClick={closeLightbox}
                         className="absolute top-4 right-4 md:top-6 md:right-6 z-20 p-2 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 transition-all duration-300 group"
                         aria-label="Close image preview"
                     >
@@ -1005,7 +1076,7 @@ export default function TrackRequests({ initialRequestId, selectedRequestId, onR
 
                     {/* Instructions */}
                     <p className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/50 text-sm">
-                        Click anywhere to close
+                        Press Escape or click anywhere to close
                     </p>
                 </div>
             )}

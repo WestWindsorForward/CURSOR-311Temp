@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Globe, Check, ChevronDown, Search } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from '../context/TranslationContext';
@@ -130,6 +130,23 @@ export default function LanguageSelector() {
         lang.code.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
+    // The dropdown could only be dismissed by clicking the backdrop, which
+    // leaves a keyboard user inside a list of 100+ languages with no way out
+    // but tabbing through all of them. Escape closes it and hands focus back
+    // to the trigger, the same contract as every other menu in the app.
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            setIsOpen(false);
+            setSearchQuery('');
+            triggerRef.current?.focus();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [isOpen]);
+
     const changeLanguage = (code: string) => {
         if (code === language) {
             setIsOpen(false);
@@ -148,9 +165,12 @@ export default function LanguageSelector() {
     return (
         <div className="relative">
             <button
+                ref={triggerRef}
                 onClick={() => setIsOpen(!isOpen)}
                 className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 transition-all text-white shadow-lg"
-                aria-label="Select language"
+                aria-label={`Select language, currently ${currentLanguage.name}`}
+                aria-haspopup="listbox"
+                aria-expanded={isOpen}
             >
                 <Globe className="w-4 h-4 flex-shrink-0" />
                 <span className="hidden sm:inline text-sm font-medium">{currentLanguage.nativeName}</span>
@@ -164,6 +184,7 @@ export default function LanguageSelector() {
                         {/* Backdrop */}
                         <div
                             className="fixed inset-0 z-[9998]"
+                            aria-hidden="true"
                             onClick={() => {
                                 setIsOpen(false);
                                 setSearchQuery('');
@@ -187,6 +208,7 @@ export default function LanguageSelector() {
                                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
                                     <input
                                         type="text"
+                                        aria-label="Search languages"
                                         placeholder="Search languages..."
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
