@@ -16,8 +16,6 @@ import {
     Volume2,
     HelpCircle,
     Sparkles, Home,
-    Camera,
-    X,
     Phone,
     ClipboardList,
     Globe,
@@ -30,6 +28,8 @@ import {
 } from 'lucide-react';
 import { Button, Input, Textarea, Card } from '../components/ui';
 import LocationPicker from '../components/LocationPicker';
+import PhotoUpload from '../components/PhotoUpload';
+import { filterPhoneInput, isValidPhone } from '../utils/phone';
 import RedirectNotice, { RedirectContact } from '../components/RedirectNotice';
 import TrackRequests from '../components/TrackRequests';
 import LanguageSelector from '../components/LanguageSelector';
@@ -376,6 +376,9 @@ export default function ResidentPortal() {
         if (!formData.email || !/\S+@\S+\.\S+/.test(formData.email)) {
             errors.email = 'Please enter a valid email address';
         }
+        if (formData.phone && !isValidPhone(formData.phone)) {
+            errors.phone = 'Please enter a valid phone number, e.g. (555) 123-4567';
+        }
 
         // Validate required custom questions
         const questions = selectedService?.routing_config?.custom_questions;
@@ -472,10 +475,7 @@ export default function ResidentPortal() {
         window.history.replaceState(null, '', window.location.pathname);
     };
 
-    const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const files = e.target.files;
-        if (!files) return;
-
+    const handlePhotoUpload = (files: FileList) => {
         const newPhotos = Array.from(files).slice(0, 3 - photos.length); // Max 3 photos
         setPhotos((prev) => [...prev, ...newPhotos]);
 
@@ -1049,45 +1049,11 @@ export default function ResidentPortal() {
                                                 )}
 
                                                 {/* Photo Upload */}
-                                                <div className="space-y-3">
-                                                    <label className="block text-sm font-medium text-white/70">
-                                                        {"Photos (optional, max 3)"}
-                                                    </label>
-
-                                                    <div className="flex gap-3 flex-wrap">
-                                                        {photoPreviewUrls.map((url, idx) => (
-                                                            <div key={idx} className="relative group">
-                                                                <img
-                                                                    src={url}
-                                                                    alt={`Photo ${idx + 1}`}
-                                                                    className="w-24 h-24 object-cover rounded-xl border border-white/20"
-                                                                />
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => handleRemovePhoto(idx)}
-                                                                    className="absolute -top-2 -right-2 p-1 bg-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
-                                                                    aria-label={`Remove photo ${idx + 1}`}
-                                                                >
-                                                                    <X className="w-4 h-4 text-white" aria-hidden="true" />
-                                                                </button>
-                                                            </div>
-                                                        ))}
-
-                                                        {photos.length < 3 && (
-                                                            <label className="w-24 h-24 flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-white/20 hover:border-white/40 cursor-pointer transition-colors">
-                                                                <Camera className="w-6 h-6 text-white/40" />
-                                                                <span className="text-xs text-white/40 mt-1">{"Add Photos"}</span>
-                                                                <input
-                                                                    type="file"
-                                                                    accept="image/*"
-                                                                    multiple
-                                                                    onChange={handlePhotoUpload}
-                                                                    className="hidden"
-                                                                />
-                                                            </label>
-                                                        )}
-                                                    </div>
-                                                </div>
+                                                <PhotoUpload
+                                                    previewUrls={photoPreviewUrls}
+                                                    onAdd={handlePhotoUpload}
+                                                    onRemove={handleRemovePhoto}
+                                                />
                                             </div>
                                         </Card>
 
@@ -1277,11 +1243,13 @@ export default function ResidentPortal() {
                                                 <Input
                                                     label={"Phone (optional)"}
                                                     type="tel"
+                                                    inputMode="tel"
                                                     placeholder="(555) 123-4567"
                                                     value={formData.phone}
                                                     onChange={(e) =>
-                                                        setFormData((prev) => ({ ...prev, phone: e.target.value }))
+                                                        setFormData((prev) => ({ ...prev, phone: filterPhoneInput(e.target.value) }))
                                                     }
+                                                    error={formErrors.phone}
                                                 />
                                             </div>
                                         </Card>
