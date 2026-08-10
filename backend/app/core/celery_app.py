@@ -23,6 +23,14 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     # Celery Beat Schedule
     #
+    # No per-entry queue option, deliberately. Every entry used to say
+    # queue="default", but the worker consumes Celery's actual default queue
+    # (named "celery") -- so every scheduled task ever published went into a
+    # queue nobody read. Backups, retention, connector checks: none had ever
+    # run except by hand, and 2,695 unconsumed messages were sitting in redis
+    # when this was found. Publishing on the default queue is what the manual
+    # `celery call` path always did, which is why manual runs worked.
+    #
     # Hourly-and-slower entries are crontab (wall-clock), not intervals. An
     # interval counts from worker boot and resets on every restart, so during
     # any stretch of active deployment the daily jobs simply never fired --
@@ -37,7 +45,6 @@ celery_app.conf.update(
         "proactive-health-scan": {
             "task": "app.tasks.service_requests.proactive_health_scan",
             "schedule": 60 * 15,  # Every 15 minutes
-            "options": {"queue": "default"}
         },
         # Road centreline refresh. Fires daily but acts on one day a month --
         # the day is derived from a hash of the township name so deployments
@@ -48,7 +55,6 @@ celery_app.conf.update(
         "monthly-road-refresh": {
             "task": "app.tasks.road_data.refresh_roads_monthly",
             "schedule": crontab(hour=4, minute=15),  # checked daily, acts monthly
-            "options": {"queue": "default"}
         },
         # Test every configured connector once a day.
         #
@@ -61,87 +67,73 @@ celery_app.conf.update(
         # credentials do not expire faster than once a day.
         "hourly-system-probe": {
             "task": "app.tasks.connector_checks.probe_system",
-            "schedule": crontab(minute=7),
-            "options": {"queue": "default"}
+            "schedule": crontab(minute=7)
         },
         "daily-connector-check": {
             "task": "app.tasks.connector_checks.verify_connectors",
-            "schedule": crontab(hour=9, minute=0),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=9, minute=0)
         },
         # Daily anchor of the audit hash-chain head (tamper-evidence beyond the DB)
         "daily-audit-anchor": {
             "task": "app.tasks.service_requests.anchor_audit_chain",
-            "schedule": crontab(hour=0, minute=30),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=0, minute=30)
         },
         # Daily retention enforcement at 1:00 AM UTC (before backup)
         "daily-retention-enforcement": {
             "task": "app.tasks.service_requests.enforce_retention_policy",
-            "schedule": crontab(hour=1, minute=0),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=1, minute=0)
         },
         # Daily purge of IP addresses older than 90 days (privacy commitment)
         "daily-ip-purge": {
             "task": "app.tasks.service_requests.purge_old_ip_addresses",
-            "schedule": crontab(hour=1, minute=30),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=1, minute=30)
         },
         # Daily database backup at 2:00 AM UTC
         "daily-database-backup": {
             "task": "app.tasks.service_requests.backup_database",
-            "schedule": crontab(hour=2, minute=0),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=2, minute=0)
         },
         # Weekly backup cleanup on Sundays at 3:00 AM UTC
         "weekly-backup-cleanup": {
             "task": "app.tasks.service_requests.cleanup_expired_backups",
-            "schedule": crontab(hour=3, minute=0, day_of_week="sunday"),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=3, minute=0, day_of_week="sunday")
         },
         # Poll connected govtech platforms for external status changes
         "pull-integration-updates": {
             "task": "app.tasks.integrations.pull_integration_updates",
             "schedule": 60 * 15,  # Every 15 minutes
-            "options": {"queue": "default"}
         },
         # Import new external comments on linked, active requests
         "pull-integration-comments": {
             "task": "app.tasks.integrations.pull_integration_comments",
             "schedule": 60 * 15,  # Every 15 minutes
-            "options": {"queue": "default"}
         },
         # Mirror external asset inventories into Pinpoint map layers
         "sync-integration-assets": {
             "task": "app.tasks.integrations.sync_integration_assets",
-            "schedule": crontab(hour=5, minute=0),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=5, minute=0)
         },
         # Weekly staff digest emails on Mondays at 8:00 AM UTC
         "weekly-staff-digest": {
             "task": "app.tasks.service_requests.send_weekly_digest",
-            "schedule": crontab(hour=8, minute=0, day_of_week="monday"),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=8, minute=0, day_of_week="monday")
         },
         # Storage hygiene that used to be two buttons on the setup page. Both
         # verify before they change anything and are no-ops with nothing to do,
         # so nobody has to work out whether they apply.
         "hourly-secret-vaulting": {
             "task": "app.tasks.storage.vault_secrets",
-            "schedule": crontab(minute=37),
-            "options": {"queue": "default"}
+            "schedule": crontab(minute=37)
         },
         "nightly-pii-rewrap": {
             "task": "app.tasks.storage.rewrap_pii",
-            "schedule": crontab(hour=6, minute=0),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=6, minute=0)
         },
         # Refresh the live AI model lists so the picker stays current and can
         # flag a retired/deprecated model without anyone opening the admin UI.
         "daily-ai-model-refresh": {
             "task": "app.tasks.service_requests.refresh_ai_models",
-            "schedule": crontab(hour=10, minute=0),
-            "options": {"queue": "default"}
+            "schedule": crontab(hour=10, minute=0)
         },
     }
 )
