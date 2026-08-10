@@ -12,7 +12,7 @@ import hmac
 import json
 import secrets as pysecrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -339,3 +339,98 @@ async def set_managed_settings(
         pass
 
     return {"status": "ok", "applied": applied, "enforced_keys": sorted(_ENFORCED_KEYS & set(incoming))}
+
+
+class HostSecretsRequest(BaseModel):
+    """The host's complete current set of shared credentials.
+
+    Full replace, like managed-settings above and for the same reason: a
+    partial push has no spelling for "stop sharing this", so a credential the
+    host withdrew in its own console would stay live in the town's vault. What
+    arrives here is everything the host is sharing right now, and a key that is
+    absent is one to take back.
+    """
+
+    # Typed rather than a bare `dict`. A value that is not a string used to
+    # reach `.strip()` inside the apply loop, raise AttributeError, and answer
+    # 500 -- after earlier keys in the same batch had already been written and
+    # committed. Pydantic rejects the malformed body up front now, and
+    # `host_secrets.apply` refuses any residual non-string per key rather than
+    # raising, so one bad entry costs that entry and nothing else.
+    secrets: Dict[str, str] = Field(default_factory=dict)
+
+
+@router.post("/host-secrets")
+async def set_host_secrets(
+    body: HostSecretsRequest,
+    db: AsyncSession = Depends(get_db),
+    actor: str = Depends(require_provisioning_token),
+):
+    """Accept provider credentials the deployment's host supplies for this town.
+
+    A town on a hosted deployment often has no account of its own with a map
+    vendor or a translation API, and waiting for one is what stalls onboarding.
+    The host has those accounts, so it can hand the instance working
+    credentials -- and the setup page then shows a configured card with a note
+    saying where the key came from, rather than an empty box for an account
+    nobody has.
+
+    Three rules, all enforced in `app.services.host_secrets`:
+
+      * only provider credential keys, never the platform's own (the secret
+        store, the KMS, anything `BACKUP_`), so this cannot become a door onto
+        where the town's credentials live;
+      * a key the TOWN configured is refused, however often it is pushed -- the
+        town's own credential wins, and a clerk's value is never reverted by a
+        machine;
+      * keys the host provided and no longer sends are deleted, vault and
+        database both.
+
+    No secret store gate here, deliberately. The admin pages refuse a
+    credential until the town has said where credentials go, because a value
+    written before that decision can end up in an off-site backup nobody chose.
+    That gate protects a person from an unmade decision; this caller is the host
+    and the answer is already the encrypted database until the town says
+    otherwise. Refusing the push would leave a freshly provisioned town with no
+    credentials and no way to be given any until an admin logged in, which is
+    the situation the feature exists to remove.
+
+    Names only in the response and in the audit trail. The values arrive, go to
+    the same store any credential goes to, and are never echoed, logged, or put
+    in an error message.
+
+    The response is {"status", "accepted", "refused", "revoked", "failed"} --
+    four sorted lists of key names. `failed` was added after the first release
+    and is additive on purpose: it names withdrawals that did not take (the
+    vault refused the delete, so the credential is still live and still the
+    host's to retry), and a caller that only reads the first three is unchanged
+    by it.
+    """
+    from app.services import host_secrets
+
+    result = await host_secrets.apply(db, body.secrets or {})
+
+    try:
+        await AuditService.log_event(
+            db,
+            event_type="provisioning_host_secrets",
+            success=True,
+            username=actor,
+            # Key names and counts. A value here would be a secret in an
+            # exportable table, which is the one thing this endpoint must not
+            # produce.
+            details={
+                "accepted": result["accepted"],
+                "refused": result["refused"],
+                "revoked": result["revoked"],
+                # Withdrawals that did not take. Worth an audit line of its own:
+                # the credential is still live in the town's vault, and this is
+                # the only record that somebody tried to take it back.
+                "failed": result["failed"],
+                "counts": {k: len(v) for k, v in result.items()},
+            },
+        )
+    except Exception:
+        pass
+
+    return {"status": "ok", **result}

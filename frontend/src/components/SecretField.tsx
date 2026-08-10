@@ -126,7 +126,7 @@ export function looksLikePlaceholder(raw: string): boolean {
  */
 export default function SecretField({
     label, value, onChange, secret = false, placeholder, help,
-    savedHint = false, required = false, autoFocus = false, kind = 'auto',
+    savedHint = false, savedLabel, required = false, autoFocus = false, kind = 'auto',
 }: {
     label: string;
     value: string;
@@ -135,6 +135,12 @@ export default function SecretField({
     placeholder?: string;
     help?: string;
     savedHint?: boolean;
+    /** What the "Saved" badge says, when plain "Saved" is not the whole story.
+     *  Used for a credential the deployment's host supplied, which is saved and
+     *  working -- the badge stays green and the box still accepts a value of
+     *  the town's own -- but which a clerk would otherwise go looking for in an
+     *  account their town does not have. Absent means "Saved". */
+    savedLabel?: string;
     required?: boolean;
     autoFocus?: boolean;
     kind?: FieldKind;
@@ -153,7 +159,7 @@ export default function SecretField({
                 {required && !savedHint && <span className="normal-case tracking-normal text-amber-300 font-medium">(required)</span>}
                 {savedHint && (
                     <span className="ml-auto normal-case tracking-normal text-[10px] font-medium text-emerald-300/80 inline-flex items-center gap-1">
-                        <CheckCircle className="w-3 h-3" aria-hidden="true" /> Saved
+                        <CheckCircle className="w-3 h-3" aria-hidden="true" /> {savedLabel || 'Saved'}
                     </span>
                 )}
             </label>

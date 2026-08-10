@@ -337,6 +337,10 @@ export interface SystemSecret {
     key_value?: string;  // Only returned for some secrets (not sensitive ones)
     description: string | null;
     is_configured: boolean;
+    /** The deployment's host supplied this credential rather than the town.
+     *  The town can still save its own value over it, which takes the key off
+     *  the host's list. Absent/false on a standalone install. */
+    host_provided?: boolean;
 }
 
 // Statistics types

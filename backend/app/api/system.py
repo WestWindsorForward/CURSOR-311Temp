@@ -377,6 +377,24 @@ async def _stored_fields(providers: List[Dict[str, Any]]) -> Dict[str, bool]:
     return out
 
 
+async def _host_provided_fields(db, stored_fields: Dict[str, bool]) -> Dict[str, bool]:
+    """{credential key: this one came from the deployment's host}.
+
+    Sits beside `_stored_fields` and reads the same set of keys, because the
+    card needs both answers about the same box: whether anything is stored, and
+    whether the town or its host put it there. A host-provided credential is a
+    working credential -- the card is green, the badge says configured, and the
+    only difference is a note under the label, so a clerk is not sent looking
+    for an account the town does not have. Typing a value over it still saves
+    and still works; that is what takes the key back.
+
+    Presence and ownership only. Never a value.
+    """
+    from app.services import host_secrets
+
+    return await host_secrets.field_provenance(db, stored_fields)
+
+
 async def _configured_map(providers: List[Dict[str, Any]]) -> Dict[str, bool]:
     """{provider id: are all of its required credentials stored}.
 
@@ -661,9 +679,11 @@ async def get_identity_catalog(
     from app.services.secret_manager import get_secret
     current = ((await get_secret(IDENTITY_PROVIDER_KEY)) or "auth0").strip().lower()
     providers = catalog_for_api()
+    stored = await _stored_fields(providers)
     return {"current_provider": current, "default_provider": "auth0",
             "providers": providers, "configured": await _configured_map(providers),
-            "stored_fields": await _stored_fields(providers),
+            "stored_fields": stored,
+            "host_provided": await _host_provided_fields(db, stored),
             "last_result": await _last_result_for(db, "identity", current)}
 
 
@@ -677,9 +697,11 @@ async def get_translation_catalog(
     from app.services.secret_manager import get_secret
     current = ((await get_secret(TRANSLATION_PROVIDER_KEY)) or "google").strip().lower()
     providers = catalog_for_api()
+    stored = await _stored_fields(providers)
     return {"current_provider": current, "default_provider": "google",
             "providers": providers, "configured": await _configured_map(providers),
-            "stored_fields": await _stored_fields(providers),
+            "stored_fields": stored,
+            "host_provided": await _host_provided_fields(db, stored),
             "last_result": await _last_result_for(db, "translation", current)}
 
 
@@ -695,9 +717,11 @@ async def get_maps_catalog(
     from app.services.secret_manager import get_secret
     current = normalize_provider(await get_secret(MAP_PROVIDER_KEY))
     providers = catalog_for_api()
+    stored = await _stored_fields(providers)
     return {"current_provider": current, "default_provider": "google",
             "providers": providers, "configured": await _configured_map(providers),
-            "stored_fields": await _stored_fields(providers),
+            "stored_fields": stored,
+            "host_provided": await _host_provided_fields(db, stored),
             "last_result": await _last_result_for(db, "maps", current)}
 
 
@@ -742,13 +766,15 @@ async def get_ai_catalog(
 
     resolved_model = current_model or AI_CATALOG.get(current_provider, {}).get("default_model")
     current_models = next((p["models"] for p in providers if p["provider"] == current_provider), [])
+    stored = await _stored_fields(providers)
     return {
         "current_provider": current_provider,
         "default_provider": "vertex",
         "current_model": resolved_model,
         "current_model_available": md.model_is_available(current_models, current_model),
         "configured": configured,
-        "stored_fields": await _stored_fields(providers),
+        "stored_fields": stored,
+        "host_provided": await _host_provided_fields(db, stored),
         "providers": providers,
         "last_result": await _last_result_for(db, "ai", current_provider),
     }
@@ -803,6 +829,7 @@ async def get_capability_catalog(
             capability, await get_secret(_PROVIDER_SELECT_KEY[capability])
         )
     providers = catalog_for_api(capability)
+    stored = await _stored_fields(providers)
 
     return {
         "current_provider": current,
@@ -817,7 +844,11 @@ async def get_capability_catalog(
         "configured": await _configured_map(providers),
         # Which individual boxes have something in them, so the form's
         # "Saved" hint stops appearing on empty optional ones.
-        "stored_fields": await _stored_fields(providers),
+        "stored_fields": stored,
+        # And which of those the deployment's host supplied rather than the
+        # town, so the hint can say so instead of sending a clerk to look for
+        # an account their town does not have.
+        "host_provided": await _host_provided_fields(db, stored),
         "last_result": await _last_result_for(db, capability, current),
         # Whether this card may change the selection. The secret store may not:
         # every credential the town has is in the current one and repointing the
@@ -965,7 +996,9 @@ def _require_a_secret_store() -> None:
 _STORE_CHOICE_KEYS = {"SECRETS_PROVIDER"}
 
 
-async def _persist_secret(db: AsyncSession, key_name: str, value: str) -> bool:
+async def _persist_secret(
+    db: AsyncSession, key_name: str, value: str, *, from_host: bool = False
+) -> bool:
     """Write a secret to the configured store and keep an encrypted DB copy.
 
     Returns whether the external store took it. That return value matters: when
@@ -977,6 +1010,13 @@ async def _persist_secret(db: AsyncSession, key_name: str, value: str) -> bool:
     stays there until somebody happens to run the migration.
 
     The caller surfaces this rather than swallowing it.
+
+    `from_host` marks the one caller that is not a town admin: the provisioning
+    endpoint through which the deployment's host supplies credentials. Every
+    other write is somebody at the town typing into a box, and that is what
+    takes ownership of a key back off the host -- see `host_secrets.forget`.
+    The flag defaults to the town reading, so a write path added later has to
+    opt out of it on purpose rather than by forgetting.
     """
     from app.core.encryption import encrypt
     from app.core.managed import reject_platform_key_writes
@@ -1025,6 +1065,17 @@ async def _persist_secret(db: AsyncSession, key_name: str, value: str) -> bool:
         secret.is_configured = bool(value)
     else:
         db.add(SystemSecret(key_name=key_name, key_value=enc, is_configured=bool(value)))
+    # The town has just entered a value of its own, so this key is no longer
+    # the host's to replace or withdraw. In the same transaction as the write
+    # it belongs to: an ownership record that can land without the value, or
+    # the value without it, is a race that reverts a clerk's credential.
+    #
+    # A blank value is "keep what is stored" everywhere else on this page and
+    # means the same here -- clearing a box does not claim the key.
+    if value and not from_host:
+        from app.services import host_secrets
+
+        await host_secrets.forget(db, key_name)
     await db.commit()
     return stored_externally
 
@@ -2868,10 +2919,15 @@ async def list_secrets(
     texting was on, and now asks /providers/status, which reports what dispatch
     resolves rather than what is stored.
     """
+    from app.services import host_secrets
     from app.services.secret_manager import get_secret
 
     result = await db.execute(select(SystemSecret))
     secrets = result.scalars().all()
+
+    # Who supplied each one. Names only, read once for the whole list rather
+    # than per row.
+    from_host = set(await host_secrets.host_provided(db))
 
     response = []
     for secret in secrets:
@@ -2884,6 +2940,11 @@ async def list_secrets(
             # and saying so is the safe direction: the cost is asking about
             # something already done, rather than ticking something unreadable.
             data.is_configured = False
+        # Both halves, the same rule `field_provenance` uses: the host owns this
+        # key AND there is a value stored under it. A key the host has since
+        # withdrawn otherwise keeps saying "supplied by your host" next to an
+        # empty box, which reads as a credential the town has and does not.
+        data.host_provided = secret.key_name in from_host and bool(data.is_configured)
         response.append(data)
 
     return response
@@ -2948,7 +3009,24 @@ async def create_or_update_secret(
             is_configured=bool(secret_data.key_value)
         )
         db.add(secret)
-    
+
+    # The other door into the secret table, and so the other place ownership
+    # has to move. This endpoint does not go through `_persist_secret` -- it
+    # predates it and writes the row itself -- so the same clearing has to be
+    # here, or a plain secret field would be the one way a town could enter its
+    # own credential and still have the host overwrite it on the next push.
+    #
+    # Unconditional, unlike `_persist_secret`, and the difference is deliberate.
+    # There a blank value means "keep what is stored" -- it is the partial save
+    # a provider card sends when a masked box was not touched. Here the box IS
+    # the credential and saving it empty is somebody clearing it on purpose:
+    # a town that deletes a host-supplied key has decided it does not want that
+    # key, and leaving it host-owned meant the next scheduled push put it
+    # straight back with no trace of who undid the deletion.
+    from app.services import host_secrets
+
+    await host_secrets.forget(db, secret_data.key_name)
+
     await db.commit()
     await db.refresh(secret)
 

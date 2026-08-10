@@ -224,6 +224,7 @@ export default function InlineProviderSetup({
                 ctx={ctx}
                 identity={identity}
                 storedFields={catalog.stored_fields}
+                hostProvided={catalog.host_provided}
                 alreadySet={alreadySet && isCurrent}
                 compact
             />

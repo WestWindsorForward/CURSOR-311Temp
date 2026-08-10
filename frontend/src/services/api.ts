@@ -227,6 +227,17 @@ export interface ProviderCatalog {
      *  configured every one of its boxes claimed to be saved -- including an
      *  optional one nobody had filled in. Presence only; no values. */
     stored_fields?: Record<string, boolean>;
+    /** Which of those boxes hold a credential the deployment's host supplied
+     *  rather than the town -- true only where a value is actually stored.
+     *
+     *  A hosted town frequently has no account of its own with a map or
+     *  translation vendor, so its host can supply working credentials and the
+     *  card is configured like any other. This only changes the wording of the
+     *  per-box "Saved" hint, so a clerk is not sent looking for an account
+     *  their town does not have. The town can still save its own value over
+     *  it, and that takes the key off the host's list. Absent on a standalone
+     *  install, where there is no host to provide one. */
+    host_provided?: Record<string, boolean>;
     /** Whether this card may change the provider. False for the secret store:
      *  every credential the town has is in the current one and repointing the
      *  setting does not move them, so the switch belongs to the cloud-profile
