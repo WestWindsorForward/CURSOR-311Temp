@@ -533,34 +533,30 @@ async def configure_auth0(
                     social_connections_errors.append(f"{conn_name}: {str(conn_err)[:50]}")
                     logger.warning(f"Failed to enable {conn_name} social connection: {conn_err}")
             
-        # Store credentials in database
-        
+        # Store credentials through the single write choke-point.
+        #
+        # This used to write SystemSecret rows here by hand, and all three of
+        # these keys are host-shareable. A town that configures its own Auth0
+        # tenant on this page was therefore leaving them marked host-provided:
+        # the next push from the host overwrote the town's SSO with the host's,
+        # and the host un-sharing Auth0 DELETED the town's own credential --
+        # both from a value nobody at the host ever typed. Ownership moves on a
+        # town-side write, and `_persist_secret` is what moves it (via
+        # `host_secrets.forget`), so this path goes through it like the other
+        # two credential write paths do.
+        #
+        # It also means these land in the configured secret store rather than
+        # only in the encrypted database copy, which is what the rest of the
+        # product already assumed was happening.
+        from app.api.system import _persist_secret
+
         for key, value in [
             ("AUTH0_DOMAIN", request.domain),
             ("AUTH0_CLIENT_ID", client_id),
             ("AUTH0_CLIENT_SECRET", client_secret)
         ]:
-            result = await db.execute(
-                select(SystemSecret).where(SystemSecret.key_name == key)
-            )
-            secret = result.scalar_one_or_none()
-            
-            encrypted_value = encrypt(value)
-            
-            if secret:
-                secret.key_value = encrypted_value
-                secret.is_configured = True
-            else:
-                secret = SystemSecret(
-                    key_name=key,
-                    key_value=encrypted_value,
-                    is_configured=True,
-                    description=f"Auth0 {key.split('_')[1].lower()}"
-                )
-                db.add(secret)
-        
-        await db.commit()
-        
+            await _persist_secret(db, key, value)
+
         # Log successful setup
         await AuditService.log_event(
             db=db,

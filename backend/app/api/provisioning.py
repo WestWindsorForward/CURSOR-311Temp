@@ -399,12 +399,15 @@ async def set_host_secrets(
     the same store any credential goes to, and are never echoed, logged, or put
     in an error message.
 
-    The response is {"status", "accepted", "refused", "revoked", "failed"} --
-    four sorted lists of key names. `failed` was added after the first release
-    and is additive on purpose: it names withdrawals that did not take (the
-    vault refused the delete, so the credential is still live and still the
-    host's to retry), and a caller that only reads the first three is unchanged
-    by it.
+    The response is {"status", "accepted", "refused", "revoked", "failed",
+    "db_only"} -- five sorted lists of key names. `failed` and `db_only` were
+    added after the first release and are additive on purpose, so a caller that
+    only reads the first three is unchanged by them. `failed` names withdrawals
+    that did not take (the vault refused the delete, so the credential is still
+    live and still the host's to retry). `db_only` names writes that reached
+    only the encrypted database copy because the external secret store would
+    not take them -- the credential works, but not for the reason the host
+    thinks, and it goes away when the database copies are scrubbed.
     """
     from app.services import host_secrets
 
@@ -427,6 +430,11 @@ async def set_host_secrets(
                 # the credential is still live in the town's vault, and this is
                 # the only record that somebody tried to take it back.
                 "failed": result["failed"],
+                # Accepted, but only into the encrypted database copy -- the
+                # external secret store did not take the write. The credential
+                # works today and vanishes the day the database copies are
+                # scrubbed, and this line is the only place that is visible.
+                "db_only": result["db_only"],
                 "counts": {k: len(v) for k, v in result.items()},
             },
         )

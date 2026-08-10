@@ -66,9 +66,15 @@ class FakeRow:
 class FakeDB:
     def __init__(self):
         self.commits = 0
+        self.flushes = 0
 
     async def commit(self):
         self.commits += 1
+
+    async def flush(self):
+        # `_store` flushes so a claim is durable inside the transaction before
+        # the caller goes off to do a multi-second vault write.
+        self.flushes += 1
 
 
 class Store:
@@ -87,6 +93,11 @@ class Store:
         # Called on every persist, so a test can act in the middle of a batch.
         self.on_persist = None
 
+        # Keys whose write lands in the encrypted database copy but which the
+        # external store will not take -- what `_persist_secret` reports by
+        # returning False.
+        self.db_only = set()
+
     async def persist(self, db, key_name, value, *, from_host=False):
         if self.on_persist:
             await self.on_persist(key_name)
@@ -94,7 +105,7 @@ class Store:
         self.writes.append(key_name)
         if from_host:
             self.host_writes.append(key_name)
-        return True
+        return key_name not in self.db_only
 
     async def configured(self, _db, key_name):
         return bool((self.values.get(key_name) or "").strip())
@@ -115,7 +126,11 @@ def town(monkeypatch):
     store = Store()
     db = FakeDB()
 
-    async def get_settings(_db, *, create=False):
+    async def get_settings(_db, *, create=False, fresh=False):
+        # `fresh` is the real helper's populate_existing re-read. There is one
+        # row object here and every read already sees the latest state, so the
+        # flag only has to be accepted -- a test that needs to simulate a
+        # concurrent write mutates `row` directly.
         return row
 
     monkeypatch.setattr("app.services.system_settings.get_settings", get_settings)
@@ -217,7 +232,8 @@ def test_a_key_off_the_allowlist_is_refused_not_written(town, key):
 def test_a_pushed_credential_is_stored_and_recorded_as_the_hosts(town):
     result = _run(host_secrets.apply(town.db, {A_KEY: VALUE}))
 
-    assert result == {"accepted": [A_KEY], "refused": [], "revoked": [], "failed": []}
+    assert result == {"accepted": [A_KEY], "refused": [], "revoked": [], "failed": [],
+                      "db_only": []}
     assert town.store.values[A_KEY] == VALUE
     assert town.row.host_provided_keys == [A_KEY]
     # Written through the host door, so the write does not take ownership away
@@ -267,7 +283,8 @@ def test_a_credential_the_town_configured_is_refused(town):
 
     result = _run(host_secrets.apply(town.db, {A_KEY: VALUE}))
 
-    assert result == {"accepted": [], "refused": [A_KEY], "revoked": [], "failed": []}
+    assert result == {"accepted": [], "refused": [A_KEY], "revoked": [], "failed": [],
+                      "db_only": []}
     assert town.store.values[A_KEY] == "the-towns-own-key"
     assert town.store.writes == []
     assert town.row.host_provided_keys == []
@@ -361,7 +378,11 @@ def test_a_configured_but_unreadable_credential_is_refused(monkeypatch):
     row = FakeRow()
     store = Store()
 
-    async def get_settings(_db, *, create=False):
+    async def get_settings(_db, *, create=False, fresh=False):
+        # `fresh` is the real helper's populate_existing re-read. There is one
+        # row object here and every read already sees the latest state, so the
+        # flag only has to be accepted -- a test that needs to simulate a
+        # concurrent write mutates `row` directly.
         return row
 
     async def unreadable(_key):
@@ -486,6 +507,151 @@ def test_every_committed_key_is_owned_at_the_moment_it_is_written(town):
     assert ANOTHER in owned_at_write[ANOTHER]
 
 
+def test_a_failed_rewrite_does_not_strand_a_key_the_host_already_owned(town):
+    """The permanent strand, and the reason the release of a claim is gated on
+    whether the key was new.
+
+    Releasing the claim is right for a key the host has never written: nothing
+    of the host's is behind it, so the row goes back to how it was. It is
+    catastrophic for a RE-push. The host's previous value is still live in the
+    town's vault, and dropping the ownership record leaves a key that is not
+    owned but does have a value -- which is exactly the shape the guard above
+    refuses. Every push after that transient blip is refused, forever, and the
+    host can neither replace the credential nor withdraw it. One failed vault
+    write, and the key is unmanageable for the life of the deployment.
+
+    Three pushes, which is the smallest sequence that shows it: accept, fail,
+    and then the recovery that used to be impossible."""
+    first = _run(host_secrets.apply(town.db, {A_KEY: VALUE}))
+    assert first["accepted"] == [A_KEY]
+    assert town.row.host_provided_keys == [A_KEY]
+
+    async def blow_up(_key_name):
+        raise RuntimeError("vault write failed")
+
+    town.store.on_persist = blow_up
+    second = _run(host_secrets.apply(town.db, {A_KEY: "AIza-not-a-real-key-0002"}))
+
+    # Refused, because the write did not happen -- but the key the host already
+    # owned is still the host's, because the value behind it is still the
+    # host's.
+    assert second["refused"] == [A_KEY]
+    assert second["accepted"] == []
+    assert town.row.host_provided_keys == [A_KEY]
+    assert town.store.values[A_KEY] == VALUE
+
+    # And that is what makes the blip recoverable: the vault comes back, the
+    # host re-pushes, and the key is replaced rather than refused.
+    town.store.on_persist = None
+    third = _run(host_secrets.apply(town.db, {A_KEY: "AIza-not-a-real-key-0003"}))
+
+    assert third["accepted"] == [A_KEY]
+    assert third["refused"] == []
+    assert town.store.values[A_KEY] == "AIza-not-a-real-key-0003"
+
+    # The withdrawal the host could no longer reach still works too.
+    fourth = _run(host_secrets.apply(town.db, {}))
+    assert fourth["revoked"] == [A_KEY]
+    assert A_KEY not in town.store.values
+
+
+def test_a_key_claimed_by_the_town_mid_push_is_not_handed_back(town):
+    """`apply` takes seconds -- a vault write per key -- and a clerk who saves
+    their own credential during that window calls `forget`, which takes the key
+    off the host.
+
+    The final ownership write used to re-add the whole accepted batch, which
+    put the clerk's key straight back on the host's books and let the next push
+    overwrite the value they had just typed. Every accepted key already claimed
+    itself at the moment it was written, so the last write has nothing to add
+    and only subtracts."""
+    async def the_clerk_saves_their_own(key_name):
+        if key_name == A_KEY:
+            # Mid-write, after the host has claimed the key: what `forget` does
+            # to the row from the clerk's own session.
+            town.row.host_provided_keys = [
+                k for k in host_secrets._normalise(town.row.host_provided_keys)
+                if k != A_KEY
+            ]
+
+    town.store.on_persist = the_clerk_saves_their_own
+
+    _run(host_secrets.apply(town.db, {A_KEY: VALUE, ANOTHER: "translator-0002"}))
+
+    # The clerk's save is the last word on that key.
+    assert A_KEY not in host_secrets._normalise(town.row.host_provided_keys)
+    # And the key the host really did provide is untouched by the correction.
+    assert ANOTHER in host_secrets._normalise(town.row.host_provided_keys)
+
+
+def test_a_write_the_external_store_would_not_take_is_reported(town):
+    """`_persist_secret` returns whether the EXTERNAL store took the value.
+    False means it landed only in the encrypted database copy, which is a
+    working credential right up until the sweep that scrubs those copies.
+
+    Every other caller surfaces that. This one dropped it on the floor, so the
+    host was told "accepted" for a credential that is not where it thinks it
+    is. Accepted is still the right answer -- the town can use the key -- but
+    not the only answer."""
+    town.store.db_only.add(ANOTHER)
+
+    result = _run(host_secrets.apply(town.db, {A_KEY: VALUE, ANOTHER: "translator-0002"}))
+
+    assert sorted(result["accepted"]) == sorted([A_KEY, ANOTHER])
+    assert result["db_only"] == [ANOTHER]
+    # Names only, here as everywhere else on this endpoint.
+    assert VALUE not in json.dumps(result)
+
+
+def test_a_key_that_is_no_longer_shareable_is_kept_rather_than_deleted(town, monkeypatch):
+    """The revoke loop had no allowlist, and the write path does.
+
+    That asymmetry deletes credentials nobody withdrew. `shareable_keys` is
+    derived from the provider catalogs, so it shrinks whenever a provider
+    leaves one or a key becomes platform-managed -- and a key stranded by that
+    change looks exactly like a key the host stopped sending. Vault and
+    database copy both go, on the strength of a catalog edit, and there is no
+    way back from here.
+
+    So a key the host owns but may no longer be given is left alone, and left
+    on the host's books: the claim is what lets the host withdraw it on purpose
+    if it ever becomes shareable again."""
+    _run(host_secrets.apply(town.db, {A_KEY: VALUE, ANOTHER: "translator-0002"}))
+    assert town.row.host_provided_keys == [ANOTHER, A_KEY]
+
+    # The catalogs stop naming A_KEY, exactly as a provider removal would.
+    shrunk = host_secrets.shareable_keys() - {A_KEY}
+    monkeypatch.setattr(host_secrets, "shareable_keys", lambda: shrunk)
+
+    result = _run(host_secrets.apply(town.db, {ANOTHER: "translator-0002"}))
+
+    assert result["revoked"] == []
+    assert town.store.deleted == []
+    # Still live, and still recorded as the host's so it can be withdrawn
+    # deliberately later.
+    assert town.store.values[A_KEY] == VALUE
+    assert A_KEY in host_secrets._normalise(town.row.host_provided_keys)
+
+
+def test_a_refused_key_in_the_payload_is_not_revoked(town):
+    """The other half of the same decision, written down because it is a choice
+    rather than an accident.
+
+    A key that arrived and was refused is a key the host is still sharing --
+    the write just could not happen. Revocation has exactly one spelling in a
+    full replace, and it is absence from the payload. Treating refusal as
+    withdrawal would delete a live credential every time a vault hiccuped."""
+    _run(host_secrets.apply(town.db, {A_KEY: VALUE, ANOTHER: "translator-0002"}))
+
+    # Blank is refused, and the key is present in the payload.
+    result = _run(host_secrets.apply(town.db, {A_KEY: "   ", ANOTHER: "translator-0002"}))
+
+    assert result["refused"] == [A_KEY]
+    assert result["revoked"] == []
+    assert town.store.values[A_KEY] == VALUE
+    assert A_KEY in host_secrets._normalise(town.row.host_provided_keys)
+
+
 # ---------------------------------------------------------------------------
 # A withdrawal that does not take
 # ---------------------------------------------------------------------------
@@ -577,6 +743,29 @@ def test_every_town_write_path_clears_provenance():
         assert "host_secrets.forget" in src, fn.__name__
 
 
+def test_the_auth0_wizard_is_a_town_write_like_any_other():
+    """A third door, and the one that was still open.
+
+    `configure_auth0` builds the town's own Auth0 application and then stored
+    AUTH0_DOMAIN, AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET by writing
+    SystemSecret rows itself. All three are host-shareable, so a town that set
+    up its OWN identity provider on that page kept them marked host-provided:
+    the next push replaced the town's SSO with the host's, and the host
+    un-sharing Auth0 deleted a credential the host never supplied. Losing sign
+    -in for a whole town, from a wizard whose entire purpose is the town's own
+    tenant.
+
+    It goes through the choke point now, which is what moves ownership."""
+    import inspect
+
+    from app.api import setup
+
+    src = inspect.getsource(setup.configure_auth0)
+    assert "_persist_secret" in src
+    # And no longer writes the rows by hand around that call.
+    assert "SystemSecret(" not in src.split("AUTH0_CLIENT_SECRET")[-1]
+
+
 # ---------------------------------------------------------------------------
 # The endpoint
 # ---------------------------------------------------------------------------
@@ -627,10 +816,11 @@ def test_the_endpoint_answers_with_names_and_audits_no_values(town, monkeypatch)
         "refused": ["SECRETS_PROVIDER"],
         "revoked": [],
         "failed": [],
+        "db_only": [],
     }
     assert recorded["event_type"] == "provisioning_host_secrets"
     assert recorded["details"]["counts"] == {
-        "accepted": 1, "refused": 1, "revoked": 0, "failed": 0,
+        "accepted": 1, "refused": 1, "revoked": 0, "failed": 0, "db_only": 0,
     }
 
     # The flat rule: a value never reaches the audit table, which is exported.
@@ -879,6 +1069,111 @@ def test_a_push_lands_before_the_town_has_chosen_a_secret_store(town, monkeypatc
     assert written.key_value != VALUE
     assert decrypt(written.key_value) == VALUE
     assert town.row.host_provided_keys == [A_KEY]
+
+
+def test_the_column_has_the_belt_and_braces_guard_too():
+    """Every recent column is added twice: once by its Alembic revision, and
+    once by init_db's idempotent ADD COLUMN IF NOT EXISTS.
+
+    That is not redundancy for its own sake. init_db is what catches an install
+    whose migration history is ahead of its actual schema -- a restored dump, a
+    stamped-not-migrated database, a town brought up from a snapshot. Without
+    the guard, `host_provided_keys` is missing on exactly those deployments and
+    every read of the settings row raises: not a degraded credential feature, a
+    500 on any page that reads settings at all."""
+    from pathlib import Path
+
+    from app.db import init_db
+
+    source = Path(init_db.__file__).read_text()
+    assert (
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS host_provided_keys"
+        in source
+    )
+
+
+def test_the_declared_schema_floor_matches_the_migration_it_ships():
+    """MIN_DB_REVISION is the oldest schema this image can start against, and
+    the orchestrator refuses an upgrade outside [min .. head].
+
+    The rule in the file is: additive migration, leave it at the PREVIOUS head.
+    The host-provided-keys migration is a single nullable ADD COLUMN, so the
+    floor is the revision immediately before it. It had been left fourteen
+    revisions back, across several contract migrations this build genuinely
+    cannot run against, which is the unsafe direction: it lets an image reach a
+    town whose schema it cannot serve, rather than merely blocking a rollout."""
+    pytest.importorskip("alembic.script")
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[1]
+
+    # The same parse the CI job does: comments out, whitespace stripped.
+    declared = ""
+    for line in (root / "MIN_DB_REVISION").read_text().splitlines():
+        if line.strip() and not line.strip().startswith("#"):
+            declared = line.strip()
+    assert declared
+
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert len(heads) == 1, f"expected one head, got {sorted(heads)}"
+
+    previous = script.get_revision(heads[0]).down_revision
+    assert declared == previous, (
+        f"MIN_DB_REVISION says {declared}, but the revision before head is {previous}"
+    )
+
+
+def test_the_guard_read_asks_the_database_rather_than_the_identity_map():
+    """The "fresh read" in `_store` has to actually be fresh.
+
+    It exists to notice a `forget` that another session committed while this
+    push was in its multi-second vault write. But an ordinary `get_settings`
+    issues the SELECT and then throws the result away: SQLAlchemy's identity
+    map already holds this row, so the attributes handed back are the ones it
+    was first loaded with, and the clerk's save is invisible. The push then
+    writes the key back onto the host's books and the next push overwrites the
+    value they typed -- the exact bug the re-read was added to prevent.
+
+    `populate_existing` is what makes the ORM overwrite the loaded attributes
+    with what the database now says, so this pins that the flag is on the
+    statement and that `_store` is the caller asking for it.
+    """
+    from app.services import system_settings
+
+    seen = []
+
+    class RecordingDB:
+        async def execute(self, statement):
+            seen.append(statement)
+
+            class Result:
+                def scalar_one_or_none(self_inner):
+                    return FakeRow()
+
+            return Result()
+
+        async def flush(self):
+            pass
+
+    def populate_existing(statement) -> bool:
+        return bool(statement.get_execution_options().get("populate_existing"))
+
+    # The default stays cheap: almost every caller wants the identity map.
+    _run(system_settings.get_settings(RecordingDB()))
+    assert not populate_existing(seen[-1])
+
+    _run(system_settings.get_settings(RecordingDB(), fresh=True))
+    assert populate_existing(seen[-1])
+
+    # And this is the caller that must not get a stale answer.
+    _run(host_secrets._store(RecordingDB(), add=[A_KEY]))
+    assert populate_existing(seen[-1])
 
 
 def test_the_ownership_column_survives_a_real_round_trip():

@@ -171,6 +171,21 @@ async def _store(db, *, add: Iterable[str] = (), drop: Iterable[str] = ()) -> Li
     decided; anything else the row says now is somebody else's decision and is
     left alone.
 
+    `fresh=True` is what makes that read actually fresh, and it is the whole
+    point of the call. An ordinary `get_settings` issues the SELECT but
+    SQLAlchemy's identity map hands back the instance this session already
+    holds, with the attribute values it was loaded with -- so the concurrent
+    `forget` this re-read exists to notice is invisible, and the clerk's key
+    goes straight back onto the host's books. `populate_existing` is what tells
+    the ORM to overwrite the loaded attributes with what the database now says.
+    (The tell that the old read was not fresh: the round-trip test in
+    test_host_provided_credentials.py needs `session.expire_all()` before it
+    can see its own committed write.)
+
+    Flushed before returning, so the claim is durable inside the transaction
+    before the caller goes off to do a multi-second vault write -- and so the
+    NEXT fresh read sees it rather than discarding it as a pending change.
+
     Assigned as a new list rather than mutated: SQLAlchemy does not track
     in-place changes to a plain JSON column, so `keys.remove(...)` would be a
     change that never reached the database -- and a provenance record that
@@ -179,10 +194,15 @@ async def _store(db, *, add: Iterable[str] = (), drop: Iterable[str] = ()) -> Li
     """
     from app.services.system_settings import get_settings
 
-    row = await get_settings(db, create=True)
+    row = await get_settings(db, create=True, fresh=True)
     fresh = set(_normalise(getattr(row, "host_provided_keys", None)))
     keys = sorted((fresh - set(drop)) | {k for k in add if k})
     row.host_provided_keys = keys
+    try:
+        await db.flush()
+    except Exception:  # pragma: no cover - a session that cannot flush
+        # The caller's commit is still ahead of us and will carry the change.
+        logger.warning("Could not flush host provenance mid-push")
     return keys
 
 
@@ -208,7 +228,12 @@ async def forget(db, key_name: str) -> bool:
             return False
         from app.services.system_settings import get_settings
 
-        row = await get_settings(db)
+        # Fresh for the same reason `_store` is: a push running right now has
+        # been committing claims key by key, and the identity map would hand
+        # this session the row as it looked before any of them. Deciding "the
+        # host does not own this key" against a stale copy is how a clerk's
+        # save fails to take the key back.
+        row = await get_settings(db, fresh=True)
         current = _normalise(getattr(row, "host_provided_keys", None))
         if key_name not in current:
             return False
@@ -304,10 +329,13 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
     Full replace: what arrives is everything the host is sharing, so anything
     the host used to provide and did not send this time is withdrawn.
 
-    Returns {"accepted", "refused", "revoked", "failed"} -- sorted key names,
-    and only names. Nothing here returns, logs or records a value. `failed` is
-    the withdrawal that did not take: the credential is still live, it is still
-    the host's, and the next push will try again.
+    Returns {"accepted", "refused", "revoked", "failed", "db_only"} -- sorted
+    key names, and only names. Nothing here returns, logs or records a value.
+    `failed` is the withdrawal that did not take: the credential is still live,
+    it is still the host's, and the next push will try again. `db_only` is the
+    write that landed in the encrypted database copy but not in the external
+    secret store, which is a working credential today and a surprise the day
+    the database copy is scrubbed.
     """
     from app.api.system import _persist_secret
 
@@ -322,10 +350,28 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
 
     accepted: List[str] = []
     refused: List[str] = []
-    # Keys claimed for the host before their write, whose write then failed.
-    # Subtracted again at the end -- see the claim below for why they are
-    # claimed first at all.
+    # Keys the host did NOT already own, claimed just before their write, whose
+    # write then failed. Subtracted again at the end -- see the claim below for
+    # why they are claimed first at all.
+    #
+    # Only keys that were new to the host go in here, and that restriction is
+    # the whole of the fix for a bug that stranded credentials permanently. A
+    # re-push of a key the host already owned used to land here too on any
+    # transient vault error, and the key was then dropped from the ownership
+    # record while the host's PREVIOUS value stayed live in the town's vault.
+    # Every push after that saw a key the host does not own with a value
+    # against it, refused it (the guard below), and the host could neither
+    # replace nor withdraw it -- one blip, stranded forever. A key already on
+    # the host's books stays on them when a re-write fails: the value that is
+    # live is still the host's, so the record still says so, and the next push
+    # simply tries the write again.
     unclaim: List[str] = []
+    # Keys whose value reached the encrypted database copy but NOT the external
+    # secret store -- `_persist_secret` returning False. Every other caller of
+    # it surfaces this, because it is the ordering trap where a credential
+    # saved before the store was reachable lives only in the database and
+    # nobody finds out. Reported so the host can see it and re-push.
+    db_only: List[str] = []
 
     for key in sorted(incoming):
         raw = incoming[key]
@@ -382,17 +428,48 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
         # nobody can manage.
         await _store(db, add=[key])
         try:
-            await _persist_secret(db, key, value, from_host=True)
+            stored_externally = await _persist_secret(db, key, value, from_host=True)
         except Exception:
             logger.warning("Could not store a host-provided credential")
             refused.append(key)
-            unclaim.append(key)
+            if key not in previously:
+                # New key, nothing of the host's behind it: releasing the claim
+                # leaves the row exactly as it was. A key the host ALREADY
+                # owned keeps its claim -- see `unclaim` above for what
+                # dropping it cost.
+                unclaim.append(key)
             continue
+        if not stored_externally:
+            db_only.append(key)
         accepted.append(key)
 
     withdrawn: List[str] = []
     failed: List[str] = []
+    # The same allowlist the write path uses, applied to the revoke path. It was
+    # missing here, and the asymmetry is not academic: `allowed` is derived from
+    # the provider catalogs, so a provider leaving a catalog or a key becoming
+    # platform-managed shrinks it between one push and the next. A key stranded
+    # on the wrong side of that change was deleted -- vault and database both --
+    # because it looked like a withdrawal, when nothing had been withdrawn and
+    # the town was simply running a build whose catalogs no longer name the key.
+    # Deleting a live credential on the strength of a catalog edit is the one
+    # direction that cannot be undone from here, so a key the host owns but may
+    # no longer be given is left alone AND left on the host's books: the claim
+    # is what lets the host withdraw it deliberately if the key ever comes back.
+    #
+    # Note what is deliberately NOT revoked on the other side of the same
+    # asymmetry: a key that arrived in this payload and was REFUSED. Refusal
+    # says the write could not happen -- the town owns the key, the value was
+    # blank, the vault errored -- and none of those is the host saying "stop
+    # sharing this". Revocation has exactly one spelling in a full replace, and
+    # it is absence from the payload. A refused key is present, so it stays.
     for key in sorted(owned - set(incoming)):
+        if key not in allowed:
+            logger.warning(
+                "Keeping a host-provided credential that is no longer shareable "
+                "rather than deleting it"
+            )
+            continue
         if await _revoke(db, key):
             withdrawn.append(key)
         else:
@@ -400,7 +477,13 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
             # credential is worse than one that is still listed as shared.
             failed.append(key)
 
-    await _store(db, add=accepted, drop=withdrawn + unclaim)
+    # Drops only. Every accepted key claimed itself at the moment it was
+    # written, so re-adding the batch here added nothing except a race: a key a
+    # town admin claimed with `forget` partway through this loop was handed
+    # straight back to the host by this line, and the next push overwrote the
+    # value the clerk had just typed. What this call is for is the two
+    # subtractions, which nothing else has applied yet.
+    await _store(db, drop=withdrawn + unclaim)
     await db.commit()
 
     return {
@@ -408,6 +491,10 @@ async def apply(db, secrets: Optional[Dict[str, str]]) -> Dict[str, List[str]]:
         "refused": sorted(refused),
         "revoked": withdrawn,
         "failed": failed,
+        # Written, but only to the encrypted database copy -- the external
+        # store did not take it. Additive, like `failed` before it: a caller
+        # reading only the older keys is unaffected.
+        "db_only": sorted(db_only),
     }
 
 

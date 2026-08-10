@@ -188,6 +188,14 @@ async def _run_schema_migrations():
         "ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS public_archived BOOLEAN NOT NULL DEFAULT false",
         "CREATE INDEX IF NOT EXISTS ix_service_requests_public_archived ON service_requests (public_archived)",
         "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_archive_days INTEGER",
+        # Which credential keys the deployment's host supplied, rather than the
+        # town (added 2026-08-10). Key NAMES only; values live in the secret
+        # store and the encrypted system_secrets copy like any other credential.
+        # NULL reads as "none of them", so an install that has not migrated
+        # behaves as a town that owns all its own credentials -- which is the
+        # safe direction: a host push is refused rather than a town's key being
+        # overwritten by one.
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS host_provided_keys JSON",
         # GovTech integrations: comment/document sync tracking (added 2026-07-01)
         "ALTER TABLE request_comments ADD COLUMN IF NOT EXISTS external_ref VARCHAR(200)",
         "CREATE INDEX IF NOT EXISTS ix_request_comments_external_ref ON request_comments (external_ref)",
