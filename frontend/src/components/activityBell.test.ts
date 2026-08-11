@@ -119,4 +119,17 @@ describe('markKeyRead', () => {
         const readIds = readIdsFromStorage(localStorage.getItem('activityFeedRead'));
         expect(count([r], { readIds })).toBe(0);
     });
+
+    it('reports failure rather than throwing when storage rejects the write (Safari private mode, quota-full)', () => {
+        const original = Storage.prototype.setItem;
+        Storage.prototype.setItem = () => {
+            throw new DOMException('QuotaExceededError');
+        };
+        try {
+            expect(() => markKeyRead('new-REQ-1')).not.toThrow();
+            expect(markKeyRead('new-REQ-1')).toBe(false);
+        } finally {
+            Storage.prototype.setItem = original;
+        }
+    });
 });

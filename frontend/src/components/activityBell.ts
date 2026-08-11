@@ -93,12 +93,34 @@ export function unreadCount({ requests, readIds, departmentIds, username, now }:
  * actually newly marked, so a caller can skip re-rendering when there was
  * nothing unread to clear -- opening a request with no unread notification
  * is a no-op.
+ *
+ * Reads the current stored set immediately before writing rather than
+ * trusting a snapshot taken earlier (e.g. at a component's mount): this and
+ * the Activity Feed's own markAsRead/markAllAsRead are independent writers
+ * of the same key, and a write built from a stale snapshot would silently
+ * undo whichever of the two ran first. Read-then-write here, at the point
+ * closest to the actual write, is what keeps both writers safe without
+ * making either the single owner of the set.
+ *
+ * The set has no eviction: every request ever opened leaves a `new-<id>` key
+ * behind permanently, even long-closed ones. Bounded by realistic use --
+ * unreadCount and the feed itself both use it only in relation to requests
+ * still inside a several-day window -- but if that ever mattered for storage
+ * size, the fix belongs at write time here (or in the feed), not in the
+ * readers.
  */
 export function markKeyRead(key: string): boolean {
     const readIds = readIdsFromStorage(localStorage.getItem('activityFeedRead'));
     if (readIds.has(key)) return false;
     readIds.add(key);
-    localStorage.setItem('activityFeedRead', JSON.stringify([...readIds]));
+    try {
+        localStorage.setItem('activityFeedRead', JSON.stringify([...readIds]));
+    } catch {
+        // Safari private mode, or a full storage quota: this must not throw
+        // out of a request-detail open. Report "nothing changed" so the
+        // caller skips the re-render its normal success path would trigger.
+        return false;
+    }
     return true;
 }
 
