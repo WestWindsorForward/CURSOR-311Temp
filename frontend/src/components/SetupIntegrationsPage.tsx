@@ -327,14 +327,32 @@ onWantAi: () => Promise<void>;
                 {/* Pasting is still allowed -- some towns get the key by
                     email from whoever administers the project -- but the
                     file picker is first, because a downloaded file is what
-                    step 4 actually leaves you holding. */}
-                <textarea
-                    placeholder="…or paste the contents"
-                    value={secretValues[jsonKey] || ''}
-                    onChange={(e) => setSecretValues(p => ({ ...p, [jsonKey]: e.target.value }))}
-                    rows={2}
-                    className="mt-2 w-full text-xs bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white placeholder-white/30 focus:outline-none focus:border-primary-400/50 resize-none font-mono"
-                />
+                    step 4 actually leaves you holding.
+
+                    Masked, through the same field every other credential on
+                    this page uses. This was a bare <textarea>, and it was the
+                    one place a private key sat in plain text on screen: the
+                    file picker above writes into the very same state, so
+                    choosing the .json file printed the whole service-account
+                    key -- private_key included -- into a box that stayed
+                    visible while a clerk carried on scrolling, screen-sharing
+                    with whoever was helping them, or walking away from the
+                    desk. The reveal toggle is still there for eyeballing a
+                    truncated paste, which is the only reason the value ever
+                    needs to be on screen at all.
+
+                    kind="json" rather than inferred, so the advisory line says
+                    whether what was pasted or read parses -- the one check
+                    worth having here, since the value is now dots. */}
+                <div className="mt-2">
+                    <SecretField
+                        label="…or paste the contents"
+                        value={secretValues[jsonKey] || ''}
+                        onChange={(v: string) => setSecretValues(p => ({ ...p, [jsonKey]: v }))}
+                        secret
+                        kind="json"
+                    />
+                </div>
             </div>
 
             <SecretField

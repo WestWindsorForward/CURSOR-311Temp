@@ -452,6 +452,11 @@ class SecretResponse(SecretBase):
     id: int
     is_configured: bool
     key_value: Optional[str] = None  # Only returned for non-sensitive configuration secrets
+    # Whether the deployment's host supplied this credential rather than the
+    # town. A note about who to ask, not a permission: the town can save its
+    # own value over it, and that takes the key off the host's list for good.
+    # False on a standalone install, where there is no host to provide one.
+    host_provided: bool = False
 
     class Config:
         from_attributes = True

@@ -27,7 +27,8 @@ import type { Capability, CloudIdentity, ProviderInfo } from '../services/api';
  * town already chose in the questionnaire.
  */
 export default function ProviderCredentialSteps({
-    cap, provider, active, values, onChange, ctx, identity, storedFields, alreadySet = false, compact = false,
+    cap, provider, active, values, onChange, ctx, identity, storedFields, hostProvided,
+    alreadySet = false, compact = false,
 }: {
     cap: Capability;
     /** Which provider's walk to render. Not read off the catalog: the guide
@@ -47,6 +48,15 @@ export default function ProviderCredentialSteps({
      *  and applying it per provider made that promise about optional boxes
      *  nobody had ever filled in -- where it is false. */
     storedFields?: Record<string, boolean>;
+    /** Which of those boxes hold a credential the deployment's host supplied
+     *  rather than the town.
+     *
+     *  Only the wording of the hint changes. The box is saved, the card is
+     *  green, and typing a value here still saves -- which is the point, and
+     *  the moment the key becomes the town's. What it prevents is a clerk
+     *  reading "Saved" and going to look for a vendor account their town has
+     *  never had. Absent on a standalone install, where there is no host. */
+    hostProvided?: Record<string, boolean>;
     /** Credentials for this provider are already stored, so an empty box means
      *  "keep what is there" rather than "not done yet". Used for the
      *  requirements block; the per-box hint reads `storedFields`. */
@@ -103,6 +113,7 @@ export default function ProviderCredentialSteps({
                 placeholder={`Enter ${f.label.toLowerCase()}`}
                 help={active.field_help?.[f.key]}
                 savedHint={storedFields?.[f.key] ?? false}
+                savedLabel={hostProvided?.[f.key] ? 'Saved · provided by your host' : undefined}
             />
         );
     };

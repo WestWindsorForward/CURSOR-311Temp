@@ -598,6 +598,14 @@ class SystemSettings(Base):
     # Refreshed on demand (admin "Refresh models") and by a daily Celery task.
     ai_models_cache = Column(JSON, default={})
 
+    # Credential keys this instance's host supplied rather than the town, as a
+    # list of key names (never values). It is a record of ownership, and every
+    # rule about host-provided credentials reads it: the host may replace or
+    # withdraw what is on this list and nothing else, and a town admin typing
+    # their own value into the same box takes the key off it -- after which the
+    # host can no longer touch it. See app/services/host_secrets.py.
+    host_provided_keys = Column(JSON, default=[])
+
     # Last-seen status per proactive health check ({check_key: status}), so the
     # alerting task only emails admins when a check crosses into a worse state.
     health_alert_state = Column(JSON, default={})

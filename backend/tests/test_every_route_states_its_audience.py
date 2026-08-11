@@ -73,6 +73,7 @@ PUBLIC_WRITES = {
     ("provisioning.py", "post", "/lifecycle"),                       # provisioning token
     ("provisioning.py", "post", "/break-glass"),                     # signed break-glass token
     ("provisioning.py", "post", "/managed-settings"),                # provisioning token
+    ("provisioning.py", "post", "/host-secrets"),                    # provisioning token
 }
 
 
