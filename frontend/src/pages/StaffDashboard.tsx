@@ -63,7 +63,7 @@ import { usePageNavigation } from '../hooks/usePageNavigation';
 import NotificationSettings from '../components/NotificationSettings';
 import ManualIntake from '../components/ManualIntake';
 import ActivityFeed from '../components/ActivityFeed';
-import { bellAppearance, readIdsFromStorage, unreadCount } from '../components/activityBell';
+import { bellAppearance, markKeyRead, readIdsFromStorage, readKey, unreadCount } from '../components/activityBell';
 import { bandFor, bandLabel, countByBand } from '../components/priority';
 import PrintWorkOrder from '../components/PrintWorkOrder';
 
@@ -628,6 +628,16 @@ export default function StaffDashboard() {
     };
 
     const loadRequestDetail = async (requestId: string) => {
+        // Opening a request's detail view is how a staff user reads it --
+        // whether that's a mouse click on a card, Enter/Space on one (both
+        // fire the same button onClick), a hash change from browser
+        // back/forward, or a "similar reports" jump. Every path lands here,
+        // so this is the one place to clear that request's unread bell
+        // notification. `markKeyRead` already no-ops (no localStorage write,
+        // no re-render) when there was nothing unread to clear.
+        if (markKeyRead(readKey({ service_request_id: requestId }))) {
+            setActivityTick(t => t + 1);
+        }
         try {
             const detail = await api.getRequestDetail(requestId);
             setSelectedRequest(detail);

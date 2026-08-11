@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Bell, MessageSquare, UserPlus, AlertCircle, Clock, ChevronRight, Building2 } from 'lucide-react';
 import { ServiceRequest } from '../types';
+import { readIdsFromStorage } from './activityBell';
 
 interface ActivityFeedProps {
     isOpen: boolean;
@@ -110,15 +111,27 @@ export default function ActivityFeed({
 
     const unreadCount = feedItems.filter(item => item.isNew).length;
 
+    // Both of these are writers of the same `activityFeedRead` set that
+    // StaffDashboard's open-detail handler (markKeyRead, in activityBell.ts)
+    // also writes to -- and this component is mounted for the dashboard's
+    // whole lifetime, so `readItems` is a snapshot taken once at mount, not
+    // at each write. Building the next value from `readItems` here would
+    // silently discard whatever markKeyRead (or the other writer) added to
+    // storage since then: open eight requests from the list, then click one
+    // feed item, and the rewrite from the stale in-memory set would put all
+    // seven other requests back in the unread count. Re-reading storage
+    // immediately before each write, and merging into that instead of into
+    // the stale `readItems`, keeps both writers safe.
     const markAsRead = (itemId: string) => {
-        const newRead = new Set(readItems);
+        const newRead = readIdsFromStorage(localStorage.getItem('activityFeedRead'));
         newRead.add(itemId);
         setReadItems(newRead);
         localStorage.setItem('activityFeedRead', JSON.stringify([...newRead]));
     };
 
     const markAllAsRead = () => {
-        const newRead = new Set([...readItems, ...feedItems.map(item => item.id)]);
+        const newRead = readIdsFromStorage(localStorage.getItem('activityFeedRead'));
+        feedItems.forEach(item => newRead.add(item.id));
         setReadItems(newRead);
         localStorage.setItem('activityFeedRead', JSON.stringify([...newRead]));
     };
