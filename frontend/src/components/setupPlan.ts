@@ -116,10 +116,12 @@ export interface PlanInput {
      * its towns bring their own map key has no map credential to enter and no
      * task to be shown.
      *
-     * Optional, and absent everywhere in this application: nothing here passes
-     * it, so every plan built by a town's own console is unchanged. It is a
-     * hole left deliberately rather than a feature in use, so that the console
-     * with the extra question does not have to fork this arithmetic to ask it.
+     * Optional, and never passed by a TOWN's own console: sign-in and maps are
+     * unconditional there, so every plan the app builds is unchanged by this
+     * field existing. The host panel is the caller that does pass it, from its
+     * payer matrix. The hole is here rather than in a fork so that the console
+     * with the extra question does not have to copy this arithmetic to ask it,
+     * and so both copies of this file stay byte-identical.
      */
     exclude?: ReadonlySet<string>;
 }
