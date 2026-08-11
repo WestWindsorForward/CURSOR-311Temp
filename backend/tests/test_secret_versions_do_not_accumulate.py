@@ -43,7 +43,21 @@ class _Client:
 PATH = "projects/p/secrets/secret-x"
 
 
+def _needs_google():
+    """`_prune_versions` imports google.api_core for the two exception types it
+    treats as success. With the client library absent that import fails inside
+    the function's own try/except, which logs and returns 0 -- so every test
+    below would pass while destroying nothing and proving nothing.
+
+    Guard on the submodule: google-* packages install into a `google/` namespace
+    package, so a bare importorskip("google") can succeed with none of the
+    libraries present.
+    """
+    pytest.importorskip("google.api_core")
+
+
 def test_it_keeps_the_newest_three_and_destroys_the_rest():
+    _needs_google()
     client = _Client(range(1, 44))          # v1..v43, like the real bundle
     sm._prune_versions(client, PATH)
     assert sorted(client.destroyed) == list(range(1, 41))
@@ -53,12 +67,14 @@ def test_it_keeps_the_newest_three_and_destroys_the_rest():
 def test_it_never_destroys_what_latest_points_to():
     """The one mistake here costs a live credential, so it is checked explicitly
     rather than inferred from the ordering."""
+    _needs_google()
     client = _Client(range(1, 10), latest=4)
     sm._prune_versions(client, PATH)
     assert 4 not in client.destroyed
 
 
 def test_nothing_to_do_when_there_are_only_a_few():
+    _needs_google()
     client = _Client([1, 2, 3])
     assert sm._prune_versions(client, PATH) == 0
     assert client.destroyed == []
@@ -66,6 +82,7 @@ def test_nothing_to_do_when_there_are_only_a_few():
 
 def test_a_version_already_gone_is_not_an_error():
     """Two writers pruning the same bundle is expected, not a failure."""
+    _needs_google()
     from google.api_core import exceptions as gexc
 
     client = _Client(range(1, 10))
@@ -80,6 +97,8 @@ def test_a_version_already_gone_is_not_an_error():
 def test_pruning_failure_never_fails_the_write():
     """The credential is already stored by the time this runs. Reporting failure
     because cleanup stumbled would turn a billing tidy-up into a lost secret."""
+    _needs_google()
+
     class _Broken:
         def list_secret_versions(self, request):
             raise RuntimeError("permission denied")

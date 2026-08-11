@@ -37,6 +37,15 @@ from app.integrations.connectors.accela import AccelaConnector, _clear_token_cac
 from app.integrations.registry import PLATFORM_CATALOG, build_connector
 
 
+
+def _needs_fastapi():
+    """The connector itself is plain httpx, so most of this file runs anywhere.
+    Only the handful of tests that reach into the API layer need the web stack;
+    they guard here rather than at module scope, which would take the OAuth and
+    scope assertions down with them."""
+    pytest.importorskip("fastapi.routing")
+
+
 CONFIG = {"agency_name": "SPRINGFIELD", "environment": "PROD", "record_type": "SR/General/Complaint/NA"}
 
 
@@ -179,6 +188,7 @@ async def test_the_redirect_uri_comes_from_the_configured_public_origin(monkeypa
     """Behind the TLS-terminating proxy, request.base_url is http://backend:8000/ —
     a URL Accela can neither match nor redirect to. The deployment's configured
     public origin is what the callback must be built on."""
+    _needs_fastapi()
     import app.api.system as system_mod
 
     monkeypatch.delenv(accela_oauth.REDIRECT_URI_KEY, raising=False)
@@ -194,6 +204,7 @@ async def test_the_redirect_uri_comes_from_the_configured_public_origin(monkeypa
 
 
 async def test_with_nothing_configured_the_request_url_is_a_logged_last_resort(monkeypatch, caplog):
+    _needs_fastapi()
     import app.api.system as system_mod
 
     monkeypatch.delenv(accela_oauth.REDIRECT_URI_KEY, raising=False)
@@ -500,6 +511,7 @@ async def test_a_dead_refresh_token_surfaces_as_a_refresh_failure(monkeypatch):
     with pytest.raises(ConnectorError) as exc:
         await AccelaConnector(CONFIG, {"refresh_token": "revoked"})._get_token()
 
+    _needs_fastapi()
     from app.api.integrations import _friendly_test_error
     assert "sign in again" in _friendly_test_error(str(exc.value)).lower()
 
