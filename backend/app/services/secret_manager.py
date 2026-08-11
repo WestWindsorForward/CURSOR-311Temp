@@ -947,11 +947,18 @@ async def migrate_to_secret_manager() -> Dict[str, Any]:
                 
                 await db.commit()
                 logger.info(f"Scrubbed {len(scrubbed)} verified secrets from database after migration")
-            else:
+            elif migrated or failed:
+                # Only worth a warning if something was actually attempted. A
+                # pass that had nothing to move verifies nothing by definition,
+                # and that used to log a warning every hour.
                 logger.warning("No secrets verified - database values NOT scrubbed")
-        
+
+        from app.services.storage_maintenance import migration_status
+
         return {
-            "status": "success" if verified else "partial_failure",
+            **migration_status(
+                verified=len(verified), failed=len(failed), skipped=len(skipped)
+            ),
             "migrated": len(migrated),
             "migrated_keys": migrated,
             "verified": len(verified),

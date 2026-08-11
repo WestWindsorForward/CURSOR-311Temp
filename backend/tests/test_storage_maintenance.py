@@ -305,3 +305,73 @@ def test_the_health_response_does_not_key_these_checks_by_vendor():
     src = inspect.getsource(health.health_check)
     assert '"kms":' in src and '"secret_store":' in src
     assert '"google_kms"' not in src
+
+
+# ---------------------------------------------------------------------------
+# What a pass with nothing to do calls itself
+# ---------------------------------------------------------------------------
+
+def test_a_pass_with_nothing_to_move_is_not_a_failure():
+    """The status line this feeds runs hourly, so its steady state is the one
+    that has to be right. Production reported
+
+        {'status': 'partial_failure', 'migrated': 0, 'verified': 0,
+         'skipped': 25, 'failed': 0, 'failed_keys': []}
+
+    every hour: every configured secret was either a bootstrap key that must
+    stay in the database or one already moved and scrubbed. Nothing failed --
+    `failed_keys` is empty -- and a status that cries failure on the healthy
+    case is a status nobody reads by the second week."""
+    out = sm.migration_status(verified=0, failed=0, skipped=25)
+
+    assert out["status"] == "ok"
+    assert "nothing to vault" in out["reason"]
+    assert "25" in out["reason"]
+
+
+def test_a_pass_that_moved_something_succeeded():
+    assert sm.migration_status(verified=3, failed=0, skipped=22)["status"] == "success"
+
+
+def test_a_pass_where_some_failed_is_partial():
+    """The word means what it says: some worked, some did not."""
+    out = sm.migration_status(verified=2, failed=1, skipped=0)
+    assert out["status"] == "partial_failure"
+
+
+def test_a_pass_where_everything_failed_is_not_called_partial():
+    """Nothing landed in the store. Calling that partial understates it, and
+    the database copies were not scrubbed -- which is the safe outcome, but
+    only if somebody is told."""
+    out = sm.migration_status(verified=0, failed=4, skipped=0)
+    assert out["status"] == "failure"
+    assert "4" in out["reason"]
+
+
+def test_the_migration_reports_through_that_helper():
+    """`"success" if verified else "partial_failure"` is the expression this
+    replaces. It has to be gone from the migration itself, or the hourly task
+    goes on reporting a partial failure of nothing."""
+    pytest.importorskip("sqlalchemy.orm")
+    import inspect
+
+    from app.services import secret_manager
+
+    src = inspect.getsource(secret_manager.migrate_to_secret_manager)
+    assert "migration_status(" in src
+    assert "partial_failure" not in src
+
+
+def test_every_status_carries_a_reason():
+    """Whatever it says, it says why. The status is read out of a Celery result
+    dict in a log line and off a setup-page status line, and neither has room
+    to explain a bare word."""
+    for args in [
+        dict(verified=0, failed=0, skipped=25),
+        dict(verified=3, failed=0, skipped=0),
+        dict(verified=2, failed=1, skipped=0),
+        dict(verified=0, failed=4, skipped=0),
+    ]:
+        out = sm.migration_status(**args)
+        assert set(out) == {"status", "reason"}
+        assert out["reason"]

@@ -82,6 +82,45 @@ def store_reachable() -> bool:
         return False
 
 
+def migration_status(*, verified: int, failed: int, skipped: int) -> Dict[str, str]:
+    """What a vaulting pass should call itself, given what it did.
+
+    Split out and made pure because the version this replaces got the quiet case
+    wrong, and got it wrong hourly. It read `"success" if verified else
+    "partial_failure"`, so a pass with nothing to do -- every configured
+    credential either a bootstrap key that must stay in the database, or already
+    moved and scrubbed on some earlier run -- reported `partial_failure` with
+    `failed: 0` and an empty `failed_keys`. That is the *steady state* of a
+    healthy deployment: production has been reporting a partial failure of
+    nothing every hour since the job was scheduled, which is how a status line
+    stops being read.
+
+    Nothing failed unless something failed. The four cases:
+
+      * something failed and nothing was verified -- the pass did not work;
+      * something failed and something was verified -- genuinely partial;
+      * something was verified -- success;
+      * neither -- there was nothing to do, which is not a failure and not
+        really a success either. `ok`, with a reason saying so.
+    """
+    if failed and not verified:
+        return {"status": "failure", "reason": f"{failed} secret(s) could not be vaulted"}
+    if failed:
+        return {
+            "status": "partial_failure",
+            "reason": f"{verified} secret(s) vaulted, {failed} could not be",
+        }
+    if verified:
+        return {"status": "success", "reason": f"{verified} secret(s) vaulted"}
+    return {
+        "status": "ok",
+        "reason": (
+            f"nothing to vault: {skipped} configured secret(s) are already in the "
+            "store or are held in the database by design"
+        ),
+    }
+
+
 async def vault_secrets(force: bool = False) -> Dict[str, Any]:
     """Move any database-held secrets into the configured store.
 
