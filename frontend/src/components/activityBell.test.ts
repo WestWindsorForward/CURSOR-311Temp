@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 
-import { NEW_FOR_MS, bellAppearance, readIdsFromStorage, readKey, unreadCount } from './activityBell';
+import { NEW_FOR_MS, bellAppearance, markKeyRead, readIdsFromStorage, readKey, unreadCount } from './activityBell';
 import { ServiceRequest } from '../types';
 
 /**
@@ -87,5 +87,36 @@ describe('storage and appearance', () => {
         expect(bellAppearance(0).icon).toContain('white');
         expect(bellAppearance(2).icon).toContain('amber');
         expect(bellAppearance(2).label).toContain('2 new reports');
+    });
+});
+
+describe('markKeyRead', () => {
+    beforeEach(() => {
+        localStorage.clear();
+    });
+
+    it('persists the key under activityFeedRead and reports it as newly read', () => {
+        expect(markKeyRead('new-REQ-1')).toBe(true);
+        expect(readIdsFromStorage(localStorage.getItem('activityFeedRead')).has('new-REQ-1')).toBe(true);
+    });
+
+    it('is a no-op the second time — nothing left to clear', () => {
+        markKeyRead('new-REQ-1');
+        expect(markKeyRead('new-REQ-1')).toBe(false);
+    });
+
+    it('leaves other requests\' keys untouched', () => {
+        markKeyRead('new-REQ-1');
+        const stored = readIdsFromStorage(localStorage.getItem('activityFeedRead'));
+        expect(stored.has('new-REQ-1')).toBe(true);
+        expect(stored.has('new-REQ-2')).toBe(false);
+    });
+
+    it('drives unreadCount down to zero once a request is opened', () => {
+        const r = req({});
+        expect(count([r])).toBe(1);
+        markKeyRead(readKey(r));
+        const readIds = readIdsFromStorage(localStorage.getItem('activityFeedRead'));
+        expect(count([r], { readIds })).toBe(0);
     });
 });

@@ -84,6 +84,24 @@ export function unreadCount({ requests, readIds, departmentIds, username, now }:
     return count;
 }
 
+/**
+ * Mark a single feed key seen and persist it under `activityFeedRead`.
+ *
+ * Used when a staff user opens a request's detail view: that request's own
+ * "new" notification should stop counting toward the bell, the same way
+ * clicking it in the Activity Feed already does. Returns whether the key was
+ * actually newly marked, so a caller can skip re-rendering when there was
+ * nothing unread to clear -- opening a request with no unread notification
+ * is a no-op.
+ */
+export function markKeyRead(key: string): boolean {
+    const readIds = readIdsFromStorage(localStorage.getItem('activityFeedRead'));
+    if (readIds.has(key)) return false;
+    readIds.add(key);
+    localStorage.setItem('activityFeedRead', JSON.stringify([...readIds]));
+    return true;
+}
+
 /** Read the seen-ids list without letting a corrupted entry break the header. */
 export function readIdsFromStorage(raw: string | null): Set<string> {
     try {
