@@ -1001,13 +1001,22 @@ async def _persist_secret(
 ) -> bool:
     """Write a secret to the configured store and keep an encrypted DB copy.
 
-    Returns whether the external store took it. That return value matters: when
-    the store is not reachable yet, set_secret returns False and logs at DEBUG,
-    which nothing raises the level for -- so the secret quietly lived only in
-    the database and the town had no way to know. It is a real ordering trap,
+    Returns whether the value ended up where this deployment intends it to
+    live. That return value matters: when an external store is configured but
+    not reachable yet, set_secret returns False and logs at DEBUG, which
+    nothing raises the level for -- so the secret quietly lived only in the
+    database and the town had no way to know. It is a real ordering trap,
     because the credentials that make Secret Manager reachable are themselves
     entered on this page: anything saved before them lands in the database and
     stays there until somebody happens to run the migration.
+
+    False therefore means "this was supposed to go somewhere else and did not",
+    NOT merely "it is in the database". On a town whose chosen store is the
+    database -- or which has not chosen one yet -- there is no somewhere else,
+    set_secret returns False for every key by design, and this returns True:
+    the credential is exactly where it belongs. Reporting those as db-only
+    made every save on the default deployment look like a credential about to
+    disappear.
 
     The caller surfaces this rather than swallowing it.
 
@@ -1042,7 +1051,16 @@ async def _persist_secret(
     # relying on DB_REQUIRED_KEYS to keep its database copy from being scrubbed
     # -- which worked, and still wrote the name of the store into the store.
     bootstrap_keys = {"GCP_SERVICE_ACCOUNT_JSON", "GOOGLE_CLOUD_PROJECT"} | _STORE_CHOICE_KEYS
-    stored_externally = key_name in bootstrap_keys
+    # A deployment whose chosen store IS the encrypted database, or which has
+    # not chosen one yet, has nothing outside the database to write to --
+    # `set_secret` returns False for every key by design, not by failure. Read
+    # as "the store rejected it", that turned an ordinary save on an ordinary
+    # database-store town into a warning that the credential was about to
+    # vanish, on every key, forever. The return value below means "the value is
+    # where this deployment intends it to live", which is true here.
+    from app.services.secret_manager import external_store_configured
+    has_external_store = external_store_configured()
+    stored_externally = key_name in bootstrap_keys or not has_external_store
     if value and key_name not in bootstrap_keys:
         try:
             if await set_secret(key_name, value):

@@ -178,6 +178,26 @@ def store_chosen() -> bool:
     return _secrets_provider() in SECRET_STORES
 
 
+def external_store_configured() -> bool:
+    """Is there a store OUTSIDE the encrypted database for secrets to go to.
+
+    Not the same question as `store_chosen`, and the difference is the whole
+    reason this exists. "database" is a real answer to "where do the keys
+    live" -- a supported, deliberate choice -- so `store_chosen()` is True for
+    it. But there is then nothing external to write to, and `set_secret`
+    returns False for every key by design rather than by failure.
+
+    Callers that read that False as "the external store would not take it"
+    need this to tell the two apart. Without it, every credential saved on a
+    database-store deployment is reported as a write that only reached the
+    database and is about to disappear -- which is alarming, wrong, and
+    describes the deployment working exactly as configured. An unanswered
+    store ("") is external-less too: a value saved before the town has chosen
+    lands in the database on purpose and `vault_secrets` sweeps it in later.
+    """
+    return _secrets_provider() in ("google", "azure", "aws")
+
+
 def _is_gcp_available() -> bool:
     """Check if Google Cloud Secret Manager is available."""
     if _config["use_gcp"] is not None:

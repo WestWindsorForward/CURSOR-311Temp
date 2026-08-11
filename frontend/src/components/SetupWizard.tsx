@@ -62,6 +62,12 @@ export default function SetupWizard(props: SetupWizardProps) {
     const tasks = useMemo(() => buildPlan(props), [
         props.cloud, props.idp, props.maps, props.aiProvider,
         props.emailProvider, props.smsProvider, props.redactionProvider, props.wanted,
+        // Nothing in this application passes `exclude` (see PlanInput), but a
+        // console that does would otherwise keep the plan it built before the
+        // exclusion changed -- the memo would hold, and the walk would go on
+        // offering a task for a credential that had just stopped being that
+        // console's to enter.
+        props.exclude,
     ]);
 
     /* Finished means finished *for the provider currently chosen*.
@@ -115,7 +121,14 @@ export default function SetupWizard(props: SetupWizardProps) {
      * away from since. */
     const openTask = tasks.find(t => t.id === openId) ?? null;
     useEffect(() => {
-        if (openTask && !taskDone(openTask)) return;
+        // Guarded on `status` for the same reason the landing effect above is.
+        // This effect runs on mount too, and before the status arrives every
+        // task reads as unfinished and nothing is open yet -- so it fell
+        // straight through to tasks[0] and opened it, which is how a clerk who
+        // had already finished the Google task landed on it anyway. Not in the
+        // dependency list on purpose: re-running when the status refreshes
+        // would reopen a task the clerk had deliberately navigated away from.
+        if (!status || (openTask && !taskDone(openTask))) return;
         const next = tasks.find(t => !taskDone(t));
         if (next && next.id !== openId) setOpenId(next.id);
         // eslint-disable-next-line react-hooks/exhaustive-deps
