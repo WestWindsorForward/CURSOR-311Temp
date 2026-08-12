@@ -8,11 +8,15 @@ from app.core.config import get_settings
 settings = get_settings()
 
 
-def _make_async_engine(**kwargs):
+def _make_async_engine(*, pre_ping: bool = True, **kwargs):
+    # pre_ping exists to catch a connection that went stale while it sat in the
+    # pool, so it is a setting about pooling: passing it alongside NullPool
+    # would read as intentional and do nothing, since a NullPool connection is
+    # freshly opened every time.
     return create_async_engine(
         settings.database_url,
         echo=settings.debug,
-        pool_pre_ping=True,
+        pool_pre_ping=pre_ping,
         **kwargs,
     )
 
@@ -62,10 +66,16 @@ def use_null_pool() -> None:
     vaulting pass was doing in production.
 
     Individual call sites tried to paper over this by disposing the engine in
-    their `finally` block, but that only helps if every one of them remembers
-    -- `road_data`, `connector_checks`, `oauth_service` and `notifications` all
-    call `asyncio.run` without disposing, and one forgotten site re-poisons the
-    pool for everybody.
+    their `finally` block, but that only helps if every one of them remembers,
+    and it is not a property anything checks. Two scheduled tasks do not
+    remember today -- `road_data.seed_roads`/`refresh_roads_monthly` and
+    `connector_checks.verify_connectors`/`probe_system` call `asyncio.run`
+    directly -- and one forgotten site re-poisons the shared pool for
+    everybody. (`oauth_service` and `notifications` have `asyncio.run` calls
+    too; the `oauth_service` ones sit in `get_google_auth_url` and
+    `get_microsoft_auth_url`, which nothing currently calls. Worth knowing
+    before chasing them, and worth not relying on: "the API process has one
+    loop" is a property of today's call sites, not of the code.)
 
     NullPool removes the shared state instead of trying to clean it up: a
     connection is opened when a session asks for one and closed when the
@@ -83,7 +93,7 @@ def use_null_pool() -> None:
         return
 
     previous = engine
-    engine = _make_async_engine(poolclass=NullPool)
+    engine = _make_async_engine(poolclass=NullPool, pre_ping=False)
     # `SessionLocal` is imported by name all over the task modules, so it has to
     # be re-bound in place rather than replaced.
     SessionLocal.configure(bind=engine)

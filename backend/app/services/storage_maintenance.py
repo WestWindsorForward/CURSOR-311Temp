@@ -82,7 +82,9 @@ def store_reachable() -> bool:
         return False
 
 
-def migration_status(*, verified: int, failed: int, skipped: int) -> Dict[str, str]:
+def migration_status(
+    *, verified: int, failed: int, skipped: int, unreadable: int = 0
+) -> Dict[str, str]:
     """What a vaulting pass should call itself, given what it did.
 
     Split out and made pure because the version this replaces got the quiet case
@@ -95,20 +97,38 @@ def migration_status(*, verified: int, failed: int, skipped: int) -> Dict[str, s
     nothing every hour since the job was scheduled, which is how a status line
     stops being read.
 
-    Nothing failed unless something failed. The four cases:
+    Nothing failed unless something failed:
 
-      * something failed and nothing was verified -- the pass did not work;
-      * something failed and something was verified -- genuinely partial;
+      * something went wrong and nothing was verified -- the pass did not work;
+      * something went wrong and something was verified -- genuinely partial;
       * something was verified -- success;
-      * neither -- there was nothing to do, which is not a failure and not
-        really a success either. `ok`, with a reason saying so.
+      * none of the above -- there was nothing to do, which is not a failure and
+        not really a success either. `ok`, with a reason saying so.
+
+    `unreadable` is counted with the failures and named separately, because it
+    is the one that would otherwise hide in the quiet case. A secret encrypted
+    under a SECRET_KEY this process no longer has decrypts to nothing, and the
+    first version of this filed that under `skipped` -- so a stuck credential
+    was reported as "already in the store or held in the database by design",
+    which is a false statement about a real problem rather than a vague one.
+    It also names its own fix, which `failed` does not: the key it was
+    encrypted under.
     """
-    if failed and not verified:
-        return {"status": "failure", "reason": f"{failed} secret(s) could not be vaulted"}
+    problems = []
     if failed:
+        problems.append(f"{failed} secret(s) could not be vaulted")
+    if unreadable:
+        problems.append(
+            f"{unreadable} secret(s) could not be decrypted and were left in the "
+            "database (encrypted under a previous SECRET_KEY)"
+        )
+
+    if problems and not verified:
+        return {"status": "failure", "reason": "; ".join(problems)}
+    if problems:
         return {
             "status": "partial_failure",
-            "reason": f"{verified} secret(s) vaulted, {failed} could not be",
+            "reason": f"{verified} secret(s) vaulted; " + "; ".join(problems),
         }
     if verified:
         return {"status": "success", "reason": f"{verified} secret(s) vaulted"}

@@ -1590,6 +1590,12 @@ class ApiClient {
         skipped_keys: string[];
         failed: number;
         failed_keys: Array<{ key: string; error: string }>;
+        // Secrets that could not be decrypted: encrypted under a SECRET_KEY
+        // this deployment no longer has. Counted apart from `failed`, which
+        // means the store refused the write, because the remedy is a different
+        // one -- the old key, not a retry.
+        unreadable?: number;
+        unreadable_keys?: Array<{ key: string; error: string }>;
         reason?: string;
         error?: string;
     }> {
