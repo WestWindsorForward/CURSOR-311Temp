@@ -1,8 +1,30 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_init, worker_process_init
 from app.core.config import get_settings
 
 settings = get_settings()
+
+
+def _use_null_pool_in_worker(**_kwargs):
+    """Worker processes get a connection pool that pools nothing.
+
+    Only in the worker: the API keeps its pool, because it has one event loop
+    for the life of the process. A worker gives every task a new loop and
+    closes it at the end, so a pooled asyncpg connection is a connection bound
+    to a dead loop -- see `app.db.session.use_null_pool` for the traceback this
+    removes.
+
+    Both signals, because which one fires depends on the pool implementation:
+    forked children get `worker_process_init`, `--pool=solo` only ever sees
+    `worker_init`. `use_null_pool` is idempotent, so both firing is fine.
+    """
+    from app.db.session import use_null_pool
+    use_null_pool()
+
+
+worker_process_init.connect(_use_null_pool_in_worker)
+worker_init.connect(_use_null_pool_in_worker)
 
 celery_app = Celery(
     "township_311",

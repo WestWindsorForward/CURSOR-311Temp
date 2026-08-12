@@ -8,17 +8,29 @@ import os
 
 
 def run_async(coro):
-    """Helper to run async functions in sync context"""
+    """Helper to run async functions in sync context.
+
+    The loop this creates is closed when the task ends, so nothing that outlives
+    it may still hold a database connection. Keeping that true is the worker
+    engine's job rather than this helper's: `app.db.session.use_null_pool`,
+    wired to Celery's worker start-up signals, gives the worker an engine that
+    pools nothing, so every connection is closed inside the loop that opened it.
+
+    The dispose below used to be the only defence, and it could not be -- half
+    the task modules (`road_data`, `connector_checks`) and two services call
+    `asyncio.run` without coming through here, and one such call site is enough
+    to leave a dead-loop connection in the shared pool for the next task to trip
+    over. It stays as the belt to that braces: it is close to free against a
+    NullPool, and it still covers a process where the signal never fired.
+    """
     from app.db.session import engine
-    
+
     async def _runner():
         try:
             return await coro
         finally:
-            # Important: dispose the engine pool when the loop is about to close
-            # to avoid loop-contaminated state in subsequent tasks
             await engine.dispose()
-            
+
     return asyncio.run(_runner())
 
 
