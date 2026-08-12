@@ -91,6 +91,45 @@ def is_worse(new_status: str, old_status: Optional[str]) -> bool:
     return _SEVERITY.get(new_status, 0) > _SEVERITY.get(old_status or "ok", 0)
 
 
+def escalations(
+    checks: List[Dict[str, Any]], previous: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Which checks just got worse and are worth emailing about.
+
+    A muted check is one an admin has already said "I know" about, so it does
+    not page anyone -- but note that `evaluate` still returns it, at its real
+    status. The mute is applied here, at the mail, and nowhere else.
+    """
+    return [
+        c for c in checks
+        if c.get("status") in ("warning", "critical")
+        and not c.get("muted")
+        and is_worse(c["status"], previous.get(c.get("key")))
+    ]
+
+
+def next_alert_state(
+    checks: List[Dict[str, Any]], previous: Dict[str, Any]
+) -> Dict[str, Any]:
+    """The per-check state to persist after a scan.
+
+    Normally the new status, so a recovery resets the de-duping and the next
+    failure is news again. The exception is a muted check that is still bad,
+    which keeps whatever state it had: a mute *defers* an alert, it does not
+    cancel it. Recording "critical" while nobody was told would mean that when
+    the mute expires the check is no longer worse than last time, and the mail
+    nobody ever received would never arrive at all.
+    """
+    return {
+        c["key"]: (
+            previous.get(c["key"])
+            if c.get("muted") and c.get("status") in ("warning", "critical")
+            else c.get("status")
+        )
+        for c in checks
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Metric collectors — each returns a check dict and never raises.
 # --------------------------------------------------------------------------- #
@@ -428,6 +467,22 @@ async def _retention_check(db) -> Dict[str, Any]:
                       "Could not determine which retention schedule is in force.")
 
 
+# Every key `collect_checks` can emit. Named here so the mute route can refuse
+# a key that is not a real check -- muting is a write, and without an allowlist
+# any admin request could insert arbitrary rows into the health table.
+CHECK_KEYS = (
+    "disk",
+    "memory",
+    "cpu",
+    "db_connections",
+    "backup",
+    "redis",
+    "kms",
+    "redaction",
+    "retention",
+)
+
+
 async def collect_checks(db) -> List[Dict[str, Any]]:
     """Run all proactive checks. Never raises; failed probes return 'unknown'."""
     checks = [
@@ -448,6 +503,22 @@ async def evaluate(db) -> Dict[str, Any]:
     """Full proactive-health evaluation for the API/alerting layers."""
     from datetime import datetime, timezone
     checks = await collect_checks(db)
+
+    # Mute state rides along; it does not filter. `overall_status` below is
+    # computed from the real statuses, and a muted check keeps its own -- so
+    # the panel still shows the problem, marked muted, and only the mail
+    # stops. A mute that dropped the row would be a dismiss button that
+    # deletes evidence, which is the failure this subsystem exists to prevent.
+    try:
+        from app.services import health_mutes
+
+        await health_mutes.annotate(db, checks)
+    except Exception:
+        logger.debug("Could not read health mutes", exc_info=True)
+        for c in checks:
+            c.setdefault("muted", False)
+            c.setdefault("muted_until", None)
+
     overall = rollup_status(checks)
     return {
         "overall_status": overall,

@@ -44,13 +44,19 @@ async def get_secret(db, key_name: str) -> str:
         return ""
 
 
+# Whether this process has already said that SMS is not configured. See the
+# `else` branch of the provider dispatch below for why it is a latch and not a
+# plain warning.
+_SMS_UNCONFIGURED_LOGGED = False
 
 
 async def configure_notifications(db):
     """Configure notification service from database secrets"""
     import logging
     logger = logging.getLogger(__name__)
-    
+
+    global _SMS_UNCONFIGURED_LOGGED
+
     # Configure SMS provider
     sms_provider = await get_secret(db, "SMS_PROVIDER")
     logger.info(f"[SMS Config] SMS_PROVIDER: {'set' if sms_provider else 'empty'}")
@@ -67,6 +73,11 @@ async def configure_notifications(db):
         notification_service._sms_provider_name = None
         logger.info("[SMS Config] text messages are switched off for this town")
         sms_provider = "none"
+
+    if sms_provider in ("twilio", "http", "sns", "acs"):
+        # Configured now, so a later un-configuration is news again rather than
+        # something the once-per-process latch has already swallowed.
+        _SMS_UNCONFIGURED_LOGGED = False
 
     if sms_provider == "twilio":
         notification_service.configure_sms("twilio", {
@@ -108,7 +119,24 @@ async def configure_notifications(db):
         # Twilio doing the work, and the log line said the opposite.
         notification_service._sms_provider = None
         notification_service._sms_provider_name = None
-        logger.warning("[SMS Config] Unknown or empty SMS_PROVIDER - SMS will not work")
+        # Once per process, not once per scheduled task.
+        #
+        # `configure_notifications` runs at the top of every notification path,
+        # including the fifteen-minute health scan, so a town that has simply
+        # not set up texting was writing this warning ~100 times a day. A
+        # warning that is always there is not a warning, it is background, and
+        # it buries the ones that mean something.
+        #
+        # Not configured is a *state*, and it is already reported as one: the
+        # SMS capability shows unconfigured on the Setup page. The honest
+        # warning is the one at the point of use -- `send_sms` still warns
+        # every time something actually tries to text with no provider, which
+        # is a real event with a real victim.
+        if _SMS_UNCONFIGURED_LOGGED:
+            logger.debug("[SMS Config] Unknown or empty SMS_PROVIDER - SMS will not work")
+        else:
+            logger.warning("[SMS Config] Unknown or empty SMS_PROVIDER - SMS will not work")
+            _SMS_UNCONFIGURED_LOGGED = True
 
     # Configure Email provider
     if not await capability_switches.enabled("email"):
@@ -1599,7 +1627,11 @@ def proactive_health_scan():
 
     async def _scan():
         from app.models import SystemSettings, User
-        from app.services.proactive_health import evaluate, is_worse
+        from app.services.proactive_health import (
+            evaluate,
+            escalations as find_escalations,
+            next_alert_state,
+        )
         from app.services.notifications import notification_service
 
         async with SessionLocal() as db:
@@ -1616,13 +1648,11 @@ def proactive_health_scan():
 
             # Which checks just got worse (ok/unknown -> warning/critical, or
             # warning -> critical)? Those are the ones worth an alert.
-            escalations = [
-                c for c in checks
-                if c["status"] in ("warning", "critical") and is_worse(c["status"], prev.get(c["key"]))
-            ]
-
-            # Persist the new per-check state regardless (so recoveries reset it).
-            settings.health_alert_state = {c["key"]: c["status"] for c in checks}
+            # Both rules -- muted checks do not page, and a mute defers rather
+            # than cancels -- are pure and live next to the checks themselves,
+            # where they are unit-tested without a database or a mail server.
+            escalations = find_escalations(checks, prev)
+            settings.health_alert_state = next_alert_state(checks, prev)
             await db.commit()
 
             if not escalations:
