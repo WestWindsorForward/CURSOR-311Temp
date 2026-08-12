@@ -677,6 +677,16 @@ class ApiClient {
         });
     }
 
+    /** The same acknowledgement, for a proactive health check (disk, backups,
+     *  ...). It rides the connector mute deliberately: same storage, same
+     *  audit event, and above all the same rule that an escalation breaks
+     *  through a mute taken at a lower severity. */
+    async muteHealthCheck(key: string, days?: number): Promise<{
+        connector: string; muted_until: string | null; muted_level: string | null;
+    }> {
+        return this.muteConnectorAlerts(`health:${key}`, days);
+    }
+
     async updateUser(id: number, data: UserUpdate): Promise<User> {
         return this.request<User>(`/users/${id}`, {
             method: 'PUT',
@@ -1948,6 +1958,12 @@ export interface HealthCheck {
     value: number | null;
     message: string;
     action: string;
+    /* Whether an admin has said "I know about this one", which stops the
+     * emails only. `status` is untouched by a mute and the check is still
+     * returned, so the panel can grey the row without pretending it passed.
+     * Optional: a backend that predates health-check muting omits both. */
+    muted?: boolean;
+    muted_until?: string | null;
 }
 
 export interface HealthSummary {

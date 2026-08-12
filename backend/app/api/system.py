@@ -523,8 +523,16 @@ async def connector_health_report(
     picks green.
     """
     from app.services import connector_health as ch
+    from app.services import health_mutes
 
-    healths = ch.worst_first(list((await ch.snapshot(db)).values()))
+    # `health:*` rows exist only to carry a mute for a proactive health check
+    # (disk, backups, ...). They are not integrations: they have no provider
+    # and nothing ever records a success against them, so leaving them in
+    # would put a permanently "unknown" phantom card on the Setup page.
+    healths = ch.worst_first([
+        h for h in (await ch.snapshot(db)).values()
+        if not health_mutes.is_health_row(h.connector)
+    ])
     return {
         "connectors": [
             {
@@ -570,15 +578,34 @@ async def mute_connector_alerts(
     one, which is the exact failure the health system exists to prevent -- so
     the card keeps saying it is broken, and adds that nobody is being emailed
     about it and until when.
+
+    The same route mutes a proactive health check (disk, backups, ...) under
+    the name `health:<check>`; those alerts are emailed by a different task but
+    the acknowledgement means the same thing, so it is stored the same way and
+    obeys the same escalation-breaks-through rule.
     """
     from sqlalchemy import select
 
     from app.models import ConnectorHealth
     from app.services import connector_alerts as alerts
+    from app.services import health_mutes
 
     row = (await db.execute(
         select(ConnectorHealth).where(ConnectorHealth.connector == connector)
     )).scalar_one_or_none()
+    health_check = health_mutes.check_key(connector)
+    if row is None and health_check is not None:
+        # A health check has no health row until somebody mutes it -- there is
+        # nothing for the probes to record against, the checks are computed
+        # fresh every run. Still allowlisted: `health:` is a namespace, not a
+        # licence to insert arbitrary names into the table.
+        from app.services.proactive_health import CHECK_KEYS
+
+        if health_check not in CHECK_KEYS:
+            raise HTTPException(status_code=404, detail="There is no health check by that name.")
+        row = ConnectorHealth(connector=connector, verifiable=False)
+        db.add(row)
+        await db.flush()
     if row is None:
         # Nothing has ever reported health for this name. Creating a row here
         # would let any admin request insert arbitrary connectors into a table
@@ -602,7 +629,16 @@ async def mute_connector_alerts(
         row.alert_muted_level = None
     else:
         row.alert_muted_until = alerts.mute_until(now, days=days)
-        row.alert_muted_level = alerts.alert_level(ch_classify(row, now=now))
+        if health_check is not None:
+            # Read the check's severity now rather than trusting the caller
+            # with it. The recorded level is what an escalation is later
+            # measured against, so a client that could name it could buy
+            # itself silence over an outage by muting "at risk".
+            row.alert_muted_level = health_mutes.alert_level(
+                await _health_check_status(db, health_check)
+            )
+        else:
+            row.alert_muted_level = alerts.alert_level(ch_classify(row, now=now))
     await db.commit()
 
     # Muting an alarm is exactly the kind of act that wants a name against it
@@ -634,6 +670,26 @@ def ch_classify(row, *, now=None):
     from app.services.connector_health import classify
 
     return classify(row, now=now)
+
+
+async def _health_check_status(db, key: str) -> str:
+    """What a proactive check is saying right now, for the mute to record.
+
+    Falls back to "critical" if the probes cannot be run: an unreadable
+    severity should produce the *narrowest* mute, and recording the worst
+    level is what makes a mute cover everything rather than break through on
+    the next reading. The alternative -- defaulting to healthy -- would file
+    the mute at a level nothing can match and silently do nothing.
+    """
+    try:
+        from app.services.proactive_health import collect_checks
+
+        for c in await collect_checks(db):
+            if c.get("key") == key:
+                return c.get("status") or "critical"
+    except Exception:
+        logger.debug("Could not read health check status for %s", key, exc_info=True)
+    return "critical"
 
 
 async def _last_result_for(db, capability: str, current: Optional[str] = None) -> Optional[dict]:
