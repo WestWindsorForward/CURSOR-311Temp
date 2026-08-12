@@ -305,3 +305,250 @@ def test_the_health_response_does_not_key_these_checks_by_vendor():
     src = inspect.getsource(health.health_check)
     assert '"kms":' in src and '"secret_store":' in src
     assert '"google_kms"' not in src
+
+
+# ---------------------------------------------------------------------------
+# A migration harness with no database and real cryptography
+# ---------------------------------------------------------------------------
+#
+# `migrate_to_secret_manager` is the function under test in the section below,
+# and the interesting input is a ciphertext, not a schema -- so the rows are
+# stand-ins and the encryption is genuine: a real Fernet token from a key this
+# process does not have is exactly what a rotated SECRET_KEY leaves behind.
+
+from types import SimpleNamespace
+
+OLD_SECRET_KEY = "the-key-this-town-rotated-away-from"
+CURRENT_SECRET_KEY = "the-key-this-town-uses-now"
+
+
+def _secret(key_name, key_value):
+    return SimpleNamespace(key_name=key_name, key_value=key_value, is_configured=True)
+
+
+def _fernet_for(secret_key):
+    from cryptography.fernet import Fernet
+
+    from app.core.encryption import _derive_key
+    return Fernet(_derive_key(secret_key))
+
+
+def _encrypted_under_an_old_key(plaintext):
+    return _fernet_for(OLD_SECRET_KEY).encrypt(plaintext.encode()).decode()
+
+
+def _encrypted_now(plaintext):
+    return _fernet_for(CURRENT_SECRET_KEY).encrypt(plaintext.encode()).decode()
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSession:
+    def __init__(self, rows):
+        self.rows = rows
+        self.commits = 0
+
+    async def execute(self, *_args, **_kwargs):
+        return _FakeResult(self.rows)
+
+    async def commit(self):
+        self.commits += 1
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+@pytest.fixture
+def run_migration(monkeypatch):
+    """Run `migrate_to_secret_manager` over given rows against a store that
+    accepts and returns everything, with the current SECRET_KEY in force."""
+    pytest.importorskip("sqlalchemy.orm")
+    pytest.importorskip("app.models")
+    import asyncio
+
+    from app.core import encryption
+    from app.db import session as db_session
+    from app.services import secret_manager
+
+    # The process's key, so a value encrypted under the old one will not open.
+    monkeypatch.setattr(
+        encryption, "_get_fernet", lambda: _fernet_for(CURRENT_SECRET_KEY)
+    )
+    monkeypatch.setattr(sm, "store_reachable", lambda: True)
+
+    def _run(rows):
+        store = {}
+
+        async def _set(key_name, value):
+            store[key_name] = value
+            return True
+
+        async def _get(key_name, *_a, **_k):
+            return store.get(key_name)
+
+        monkeypatch.setattr(secret_manager, "set_secret", _set)
+        monkeypatch.setattr(secret_manager, "get_secret", _get)
+        monkeypatch.setattr(secret_manager, "clear_cache", lambda *a, **k: None)
+        monkeypatch.setattr(db_session, "SessionLocal", lambda: _FakeSession(rows))
+
+        return asyncio.run(secret_manager.migrate_to_secret_manager())
+
+    return _run
+
+
+# ---------------------------------------------------------------------------
+# What a pass with nothing to do calls itself
+# ---------------------------------------------------------------------------
+
+def test_a_pass_with_nothing_to_move_is_not_a_failure():
+    """The status line this feeds runs hourly, so its steady state is the one
+    that has to be right. Production reported
+
+        {'status': 'partial_failure', 'migrated': 0, 'verified': 0,
+         'skipped': 25, 'failed': 0, 'failed_keys': []}
+
+    every hour: every configured secret was either a bootstrap key that must
+    stay in the database or one already moved and scrubbed. Nothing failed --
+    `failed_keys` is empty -- and a status that cries failure on the healthy
+    case is a status nobody reads by the second week."""
+    out = sm.migration_status(verified=0, failed=0, skipped=25)
+
+    assert out["status"] == "ok"
+    assert "nothing to vault" in out["reason"]
+    assert "25" in out["reason"]
+
+
+def test_a_pass_that_moved_something_succeeded():
+    assert sm.migration_status(verified=3, failed=0, skipped=22)["status"] == "success"
+
+
+def test_a_pass_where_some_failed_is_partial():
+    """The word means what it says: some worked, some did not."""
+    out = sm.migration_status(verified=2, failed=1, skipped=0)
+    assert out["status"] == "partial_failure"
+
+
+def test_a_pass_where_everything_failed_is_not_called_partial():
+    """Nothing landed in the store. Calling that partial understates it, and
+    the database copies were not scrubbed -- which is the safe outcome, but
+    only if somebody is told."""
+    out = sm.migration_status(verified=0, failed=4, skipped=0)
+    assert out["status"] == "failure"
+    assert "4" in out["reason"]
+
+
+def test_the_migration_reports_through_that_helper(monkeypatch, run_migration):
+    """`"success" if verified else "partial_failure"` was the expression this
+    replaces, and the point of moving it out is that there is now one place
+    where the question is answered. Asserted by behaviour rather than by
+    reading the source for a banned word: the helper's answer has to be what
+    comes back, whatever it says."""
+    from app.services import storage_maintenance
+
+    monkeypatch.setattr(
+        storage_maintenance, "migration_status",
+        lambda **kw: {"status": "sentinel", "reason": "from the helper"},
+    )
+
+    result = run_migration([_secret("SMTP_PASSWORD", _encrypted_now("hunter2"))])
+
+    assert result["status"] == "sentinel"
+    assert result["reason"] == "from the helper"
+
+
+# ---------------------------------------------------------------------------
+# A secret encrypted under a SECRET_KEY we no longer have
+# ---------------------------------------------------------------------------
+
+def test_a_secret_from_a_previous_key_is_not_reported_as_nothing_to_do(run_migration):
+    """This deployment has rotated SECRET_KEY, so this is a case that has
+    happened rather than one that could.
+
+    `decrypt_safe` returns an empty string for a value that looks encrypted and
+    will not decrypt -- deliberately, so corrupted data is not exposed -- and
+    the first version of this counted that as `skipped`. Skipped keys are then
+    described as "already in the store or held in the database by design",
+    which about a credential nobody can read is not a vague statement, it is a
+    false one: the town's Twilio token is stuck in the database, unreadable and
+    unvaultable, and the hourly job says everything is fine."""
+    result = run_migration([_secret("SMTP_PASSWORD", _encrypted_under_an_old_key("hunter2"))])
+
+    assert result["status"] == "failure"
+    assert result["unreadable"] == 1
+    assert result["unreadable_keys"][0]["key"] == "SMTP_PASSWORD"
+    assert "SECRET_KEY" in result["reason"]
+    assert result["skipped"] == 0, "an unreadable secret is not a skipped one"
+    assert "by design" not in result["reason"]
+
+
+def test_an_unreadable_secret_is_not_scrubbed(run_migration):
+    """The database copy is the only copy, and it is the copy that a restored
+    backup or a re-instated key can still decrypt. Nothing about it being
+    unreadable today makes deleting it safe."""
+    rows = [_secret("SMTP_PASSWORD", _encrypted_under_an_old_key("hunter2"))]
+    before = rows[0].key_value
+
+    result = run_migration(rows)
+
+    assert rows[0].key_value == before
+    assert result["scrubbed"] == 0
+
+
+def test_one_unreadable_secret_among_good_ones_is_partial(run_migration):
+    """Not `failure`: the others did move, and were scrubbed. Not `success`
+    either, which is what this would have been -- one verified secret was
+    enough to call the whole pass a success while a credential sat stuck."""
+    result = run_migration([
+        _secret("SMTP_PASSWORD", _encrypted_under_an_old_key("hunter2")),
+        _secret("TWILIO_AUTH_TOKEN", _encrypted_now("t0ken")),
+    ])
+
+    assert result["status"] == "partial_failure"
+    assert result["verified"] == 1
+    assert result["unreadable"] == 1
+    assert "SECRET_KEY" in result["reason"]
+
+
+def test_the_helper_counts_unreadable_secrets_as_a_problem():
+    """The pure form of the three cases above."""
+    stuck = sm.migration_status(verified=0, failed=0, skipped=3, unreadable=1)
+    assert stuck["status"] == "failure"
+    assert "decrypted" in stuck["reason"]
+
+    mixed = sm.migration_status(verified=2, failed=0, skipped=3, unreadable=1)
+    assert mixed["status"] == "partial_failure"
+
+    both = sm.migration_status(verified=0, failed=1, skipped=0, unreadable=1)
+    assert both["status"] == "failure"
+    assert "vaulted" in both["reason"] and "decrypted" in both["reason"]
+
+    assert sm.migration_status(
+        verified=0, failed=0, skipped=25, unreadable=0
+    )["status"] == "ok"
+
+
+def test_every_status_carries_a_reason():
+    """Whatever it says, it says why. The status is read out of a Celery result
+    dict in a log line and off a setup-page status line, and neither has room
+    to explain a bare word."""
+    for args in [
+        dict(verified=0, failed=0, skipped=25),
+        dict(verified=3, failed=0, skipped=0),
+        dict(verified=2, failed=1, skipped=0),
+        dict(verified=0, failed=4, skipped=0),
+    ]:
+        out = sm.migration_status(**args)
+        assert set(out) == {"status", "reason"}
+        assert out["reason"]

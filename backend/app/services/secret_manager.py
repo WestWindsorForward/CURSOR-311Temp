@@ -883,6 +883,10 @@ async def migrate_to_secret_manager() -> Dict[str, Any]:
     failed = []
     skipped = []
     scrubbed = []
+    # Kept apart from `failed`: a write that the store refused is a different
+    # problem from a value this process cannot read, and the second one names
+    # its own fix (the key that encrypted it).
+    unreadable = []
     
     # Keys that should NOT be migrated (they're needed to access Secret Manager itself)
     bootstrap_keys = set(DB_REQUIRED_KEYS)
@@ -903,14 +907,36 @@ async def migrate_to_secret_manager() -> Dict[str, Any]:
                     skipped.append(secret.key_name)
                     continue
                 
-                # Decrypt the value from database
+                # Decrypt the value from database.
+                #
+                # A falsy result is not "nothing to do". `decrypt_safe` returns
+                # a legacy plaintext value unchanged and an empty string when a
+                # value that looks encrypted will not decrypt -- and the row got
+                # past the `key_value` check above, so empty means the latter:
+                # the value is stored under a SECRET_KEY this process does not
+                # have. That is a stuck credential, and this used to file it
+                # under `skipped`, where it read as "already in the store or
+                # held in the database by design". It is neither. This
+                # deployment has rotated SECRET_KEY before, so the case is real
+                # rather than theoretical.
+                #
+                # The exception branch is the same condition arriving by a
+                # different route (`decrypt_safe` swallows InvalidToken, but
+                # `decrypt_pii` for a KMS-wrapped value may not), so both land
+                # in the same list.
                 try:
                     plaintext = decrypt_safe(secret.key_value)
                     if not plaintext:
-                        skipped.append(secret.key_name)
+                        unreadable.append({
+                            "key": secret.key_name,
+                            "error": "could not be decrypted with the current SECRET_KEY",
+                        })
                         continue
-                except Exception:
-                    failed.append({"key": secret.key_name, "error": "decryption failed"})
+                except Exception as exc:
+                    unreadable.append({
+                        "key": secret.key_name,
+                        "error": f"could not be decrypted: {type(exc).__name__}",
+                    })
                     continue
                 
                 # Write to Secret Manager
@@ -947,11 +973,21 @@ async def migrate_to_secret_manager() -> Dict[str, Any]:
                 
                 await db.commit()
                 logger.info(f"Scrubbed {len(scrubbed)} verified secrets from database after migration")
-            else:
+            elif migrated or failed:
+                # Only worth a warning if something was actually attempted. A
+                # pass that had nothing to move verifies nothing by definition,
+                # and that used to log a warning every hour.
                 logger.warning("No secrets verified - database values NOT scrubbed")
-        
+
+        from app.services.storage_maintenance import migration_status
+
         return {
-            "status": "success" if verified else "partial_failure",
+            **migration_status(
+                verified=len(verified),
+                failed=len(failed),
+                skipped=len(skipped),
+                unreadable=len(unreadable),
+            ),
             "migrated": len(migrated),
             "migrated_keys": migrated,
             "verified": len(verified),
@@ -961,9 +997,11 @@ async def migrate_to_secret_manager() -> Dict[str, Any]:
             "skipped": len(skipped),
             "skipped_keys": skipped,
             "failed": len(failed),
-            "failed_keys": failed
+            "failed_keys": failed,
+            "unreadable": len(unreadable),
+            "unreadable_keys": unreadable,
         }
-        
+
     except Exception as e:
         logger.error(f"Migration failed: {e}")
         return {
