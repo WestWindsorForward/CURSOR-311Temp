@@ -696,19 +696,63 @@ async def list_open311_services(db: AsyncSession = Depends(get_db)):
 
 
 # A phone photo is a few megabytes; three of them plus form overhead is the
-# realistic ceiling for one submission. Anything past this is refused before the
-# bytes are read into memory rather than after.
+# realistic ceiling for one submission.
+#
+# This is the LAST of three ceilings, not the first, and it cannot be the first:
+# by the time this handler runs, FastAPI has already parsed the multipart body
+# and spooled anything over 1MB to the container's disk. Caddy's `request_body
+# max_size` refuses an oversized body at the edge and BodySizeLimitMiddleware
+# refuses it before routing; this one is what makes "under 12 MB" the message a
+# resident actually sees.
 MAX_SCREEN_BYTES = 12 * 1024 * 1024
+
+
+def _screen_rate_key(request: Request) -> str:
+    """Rate-limit key for photo screening: the caller, not the proxy.
+
+    slowapi's default `get_remote_address` reads request.client.host, which
+    behind Caddy is 172.19.0.x for every resident in town -- one global bucket.
+    A 12/minute limit on that bucket is not a per-abuser cap at all: it is a
+    denial-of-service switch anyone can flip, taking photo screening away from
+    the whole town for the cost of twelve requests a minute.
+
+    X-Forwarded-For is trusted ONLY when the direct peer is a private address,
+    which on this deployment means the request came from our own Caddy. uvicorn
+    runs without --forwarded-allow-ips so nothing else has already rewritten it,
+    and a header arriving from a public peer is ignored outright -- so a client
+    on the open internet cannot mint itself a fresh bucket per request.
+    """
+    import ipaddress
+
+    peer = request.client.host if request.client else ""
+    try:
+        private = ipaddress.ip_address(peer).is_private or ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        private = False
+
+    if private:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first[:64]
+    return peer or "unknown"
 
 
 @router.post("/photos/screen")
 # Unauthenticated, like the rest of resident intake -- a resident has no account
 # to sign in to. But unlike the rest of it this endpoint spends money on every
 # call (a Vision annotate) and holds an image in the database, so it is limited
-# harder than create_request's 10/minute. Twelve is four full three-photo forms
-# a minute from one address, which no real resident approaches and which caps an
-# abusive client's spend at something a town would not notice on a bill.
-@limiter.limit("12/minute")
+# harder than create_request's 10/minute.
+#
+# Two dimensions, deliberately. Twelve a minute per CALLER is four full
+# three-photo forms, which no real resident approaches. The second, global limit
+# is the spend ceiling: it bounds what the whole deployment can be made to spend
+# at Google in a minute no matter how many addresses are asking, and it is set
+# far enough above the per-caller limit that a town's genuine peak never reaches
+# it. Without the per-caller dimension the global one is a switch any single
+# client can flip to deny screening to everybody -- see _screen_rate_key.
+@limiter.limit("240/minute", key_func=lambda request: "photos:screen:global")
+@limiter.limit("12/minute", key_func=_screen_rate_key)
 async def screen_photo(
     request: Request,
     file: UploadFile = File(...),
@@ -777,6 +821,24 @@ async def screen_photo(
             "handle": handle,
             "status": "needs_review",
             "reason": reason,
+            "message": "We couldn't check this photo automatically. It will be attached "
+                       "for a staff member to review before it appears publicly.",
+        }
+
+    if batch.media[0] == media:
+        # Our own pipeline never hands back the bytes it was given: a blur
+        # re-encodes, and a clean photo still goes through strip_exif. Identical
+        # bytes therefore mean nothing in this module processed this image, and
+        # certifying it "ready" would publish it unmoderated, unblurred and with
+        # its EXIF GPS block intact. Refuse to be the thing that says it is
+        # fine.
+        logger.warning("[SCREEN PHOTO] unprocessed bytes came back; holding for review")
+        handle = await photo_handles.mint(db, verdict="needs_review", reason="unprocessed")
+        await db.commit()
+        return {
+            "handle": handle,
+            "status": "needs_review",
+            "reason": "unprocessed",
             "message": "We couldn't check this photo automatically. It will be attached "
                        "for a staff member to review before it appears publicly.",
         }
@@ -889,15 +951,18 @@ async def create_request(
                    "can't be submitted. Please remove it and try again.",
         )
 
-    # Rebuild the resident's ordering: the screened half kept the index it had
-    # in the submitted list, the inline half comes back in its own order, minus
-    # anything the redactor withheld.
+    # Rebuild the resident's ordering. Both halves say which submitted slot they
+    # came from -- the screened half from its handle's position, the inline half
+    # from BatchResult.kept -- because once a photo can be WITHHELD the inline
+    # results are no longer positionally aligned with what went in. Pairing them
+    # up by position instead would slide a later photo into an earlier one's
+    # place, which on a report carrying a "before" and an "after" swaps what
+    # each of them means.
     slots = dict(resolved.screened)
-    inline_out = list(redacted.media)
-    for index, _ in resolved.inline:
-        if inline_out:
-            slots[index] = inline_out.pop(0)
-    request_data.media_urls = [slots[i] for i in sorted(slots)] + inline_out
+    for out_index, src_index in enumerate(redacted.kept):
+        if src_index < len(resolved.inline):
+            slots[resolved.inline[src_index][0]] = redacted.media[out_index]
+    request_data.media_urls = [slots[i] for i in sorted(slots)]
 
     # Photos the detector could not clear. They are NOT put in media_urls -- see
     # ServiceRequest.media_pending_review -- so no public surface can render one

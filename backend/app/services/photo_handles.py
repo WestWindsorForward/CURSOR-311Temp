@@ -63,6 +63,12 @@ HANDLE_TTL_MINUTES = 60
 # the endpoint's rate limit, so this is the cap on what one report can spend.
 MAX_HANDLES = 3
 
+# Hard ceiling on rows in flight, enforced on every mint rather than only on the
+# hourly reap. Each row is a full-resolution JPEG as base64 text, so ~600 rows
+# is a few hundred megabytes -- well above any real town's concurrent form
+# traffic and well below anything that threatens the database.
+MAX_STORED_PHOTOS = 600
+
 
 def is_handle(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(HANDLE_PREFIX)
@@ -80,6 +86,48 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def _evict_over_cap(db) -> int:
+    """Keep the table bounded, without waiting for the hourly reap.
+
+    Every row is a full-resolution JPEG stored as base64 text in Postgres, and
+    the writer is an endpoint with no login. Between two reaps the only other
+    limit is the rate limit, so the steady state was "whatever an hour of
+    accepted uploads weighs" -- comfortably into the gigabytes if anyone is
+    trying, and it grows fastest under exactly the traffic that means abuse.
+
+    Expired rows go first, since nothing can redeem them. Only if the table is
+    still over the cap do live rows go, oldest first -- and an evicted live
+    handle degrades to "stale", which the client already recovers from by
+    resending the photo inline. Losing that photo was never on the table.
+    """
+    from sqlalchemy import delete, func, select
+
+    from app.models import ScreenedPhoto
+
+    total = (await db.execute(
+        select(func.count()).select_from(ScreenedPhoto)
+    )).scalar_one()
+    if total < MAX_STORED_PHOTOS:
+        return 0
+
+    dropped = await reap(db)
+    over = total - dropped - MAX_STORED_PHOTOS + 1
+    if over <= 0:
+        return dropped
+
+    oldest = (await db.execute(
+        select(ScreenedPhoto.id).order_by(ScreenedPhoto.created_at.asc()).limit(over)
+    )).scalars().all()
+    if oldest:
+        await db.execute(delete(ScreenedPhoto).where(ScreenedPhoto.id.in_(oldest)))
+        logger.warning(
+            "[Photo handles] table at cap (%d); evicted %d live handle(s). "
+            "Those submissions fall back to screening at submit time.",
+            MAX_STORED_PHOTOS, len(oldest),
+        )
+    return dropped + len(oldest)
+
+
 async def mint(db, *, verdict: str, media: Optional[str] = None,
                reason: str = "", faces: int = 0, plates: int = 0) -> str:
     """Store a screening result and return the handle that names it.
@@ -88,6 +136,8 @@ async def mint(db, *, verdict: str, media: Optional[str] = None,
     is not prepared to have published.
     """
     from app.models import ScreenedPhoto
+
+    await _evict_over_cap(db)
 
     token = new_token()
     db.add(ScreenedPhoto(
@@ -103,31 +153,54 @@ async def mint(db, *, verdict: str, media: Optional[str] = None,
     return HANDLE_PREFIX + token
 
 
-async def _take(db, token: str):
-    """Fetch a live row and delete it, or return None.
+class _Taken:
+    """The columns of a redeemed row, detached from the session it came from."""
 
-    The delete is the single-use property: two concurrent submissions quoting
-    the same handle cannot both attach the photo, and a token that leaks after
-    the report is filed names nothing.
+    __slots__ = ("verdict", "media", "reason", "faces", "plates", "expires_at")
+
+    def __init__(self, verdict, media, reason, faces, plates, expires_at):
+        self.verdict = verdict
+        self.media = media
+        self.reason = reason
+        self.faces = faces
+        self.plates = plates
+        self.expires_at = expires_at
+
+
+async def _take(db, token: str):
+    """Delete a row and return what it held, or None. Atomically.
+
+    ONE statement, not a SELECT followed by a delete. The read-then-delete
+    version was a race with a real trigger: this whole feature exists because
+    people double-tap Submit. Both requests would load the row, both would
+    believe they had claimed the photo, and then one of them would fail its
+    delete -- a 500, or a 409 whose single inline retry goes through and files
+    the report twice.
+
+    DELETE ... RETURNING makes the database pick the winner. The loser gets no
+    row and is told the handle is stale, which is exactly true: someone else
+    spent it.
     """
-    from sqlalchemy import select
+    from sqlalchemy import delete
 
     from app.models import ScreenedPhoto
 
     row = (await db.execute(
-        select(ScreenedPhoto).where(ScreenedPhoto.token == token)
-    )).scalar_one_or_none()
+        delete(ScreenedPhoto)
+        .where(ScreenedPhoto.token == token)
+        .returning(ScreenedPhoto.verdict, ScreenedPhoto.media, ScreenedPhoto.reason,
+                   ScreenedPhoto.faces, ScreenedPhoto.plates, ScreenedPhoto.expires_at)
+    )).first()
     if row is None:
         return None
 
-    expires_at = row.expires_at
+    taken = _Taken(*row)
+    expires_at = taken.expires_at
     if expires_at is not None and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-    await db.delete(row)
     if expires_at is not None and expires_at < _now():
         return None
-    return row
+    return taken
 
 
 class ResolvedMedia:
@@ -146,6 +219,10 @@ class ResolvedMedia:
         self.screened: List[Tuple[int, str]] = []
         self.withheld: List[Dict[str, str]] = []
         self.stale: List[str] = []
+        # Handles past MAX_HANDLES. Not redeemed and not an error -- the same
+        # cap applies to inline media -- but named, so a fourth photo does not
+        # vanish between the client and the log.
+        self.overflow: List[str] = []
         self.blocked: bool = False
         self.faces: int = 0
         self.plates: int = 0
@@ -172,7 +249,10 @@ async def resolve(db, media: Optional[List[Any]]) -> ResolvedMedia:
         taken += 1
         if taken > MAX_HANDLES:
             # Past the cap the photo was never a candidate on the inline path
-            # either; drop the handle rather than redeem it.
+            # either. Do not redeem it -- but say so, rather than letting a
+            # fourth photo disappear between the client and the log.
+            out.overflow.append(item)
+            logger.info("[Photo handles] ignoring handle past the %d-photo cap", MAX_HANDLES)
             continue
 
         row = await _take(db, _token_of(item))

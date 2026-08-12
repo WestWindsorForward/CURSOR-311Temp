@@ -21,6 +21,21 @@
 # tenant import and the panel block, and pointed the frontend at the Vite dev
 # server.
 (pinpoint_site) {
+	# Nothing this site accepts is larger than one phone photo. The resident
+	# photo-screening endpoint is unauthenticated and multipart, and FastAPI
+	# parses a multipart body -- spooling anything over 1MB to the container's
+	# disk -- before the handler's own size check or the rate limiter can run.
+	# So the ceiling has to sit in front of the application, and one anonymous
+	# POST streaming an arbitrary body is refused here rather than filling a
+	# disk and taking the instance down.
+	#
+	# The backend carries a matching limit of its own (MAX_REQUEST_BODY_BYTES),
+	# because this file can be edited, regenerated for a custom domain, or
+	# bypassed by anything already on the compose network.
+	request_body {
+		max_size 13MB
+	}
+
 	handle /api/* {
 		# The backend sets a per-response CSP (locked-down for JSON, inline-safe
 		# for its few HTML pages like demo/bootstrap login), so don't override it

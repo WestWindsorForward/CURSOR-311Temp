@@ -203,3 +203,100 @@ def test_detections_are_left_alone_when_nothing_was_downscaled():
     parsed = ir.google_faces(_vision_face(100, 100, 200, 200), 1200, 900)
     same = ir.rescaled(parsed, 1200, 900, 1200, 900)
     assert same[0].to_pixels(1200, 900) == parsed[0].to_pixels(1200, 900)
+
+
+# --------------------------------------------------------------------------
+# formats this build cannot read
+# --------------------------------------------------------------------------
+
+# An AVIF file: ISO-BMFF, `ftypavif` at offset 4. Pillow 11 in this image has no
+# AVIF plugin and no HEIF opener registered, so it cannot open this -- while
+# every current browser renders it and every recent iPhone produces its HEIC
+# cousin. That gap is the whole point: "we could not decode it" is not "it is
+# not a photo", and it certainly is not "there is nothing in it".
+AVIF_SHAPED = (
+    b"\x00\x00\x00\x20ftypavif\x00\x00\x00\x00avifmif1miaf"
+    + b"\x00\x00\x00\x10meta" + b"\x00" * 64
+)
+
+
+def test_this_build_genuinely_cannot_read_avif():
+    """The premise of the tests below. If Pillow ever gains AVIF support this
+    fails, and the reasoning that follows needs rechecking rather than the
+    assertion being deleted."""
+    width, height, refusal = ir.readable_size(AVIF_SHAPED)
+    assert (width, height) == (0, 0)
+    assert refusal == "unreadable-image"
+
+
+def test_an_undecodable_photo_is_withheld_not_published():
+    """The failure this closes.
+
+    An image we cannot open never reaches Vision, so SafeSearch never runs, no
+    face is ever looked for, and strip_exif never removes the GPS block. It used
+    to be passed through anyway, on the reasoning that a file we cannot decode
+    has no face in it to leak -- which reads "Pillow cannot decode this" as
+    "nothing can". Publishing it means publishing an unmoderated, unblurred
+    photo carrying the reporter's coordinates, precisely because we could not
+    read it.
+    """
+    assert "unreadable-image" in ir.WITHHOLD_REASONS
+
+
+def test_an_absurdly_large_photo_is_refused_before_it_is_decoded():
+    """Pillow only WARNS between 89.5M and 179M pixels, and a convert("RGB") in
+    that band allocates about a gigabyte inside the API worker -- from a small
+    upload, on an endpoint anyone can reach. The header carries the dimensions,
+    so this costs nothing to check."""
+    import io
+
+    from PIL import Image
+
+    huge = io.BytesIO()
+    Image.new("L", (12000, 12000)).save(huge, format="PNG")   # 144M pixels
+    width, height, refusal = ir.readable_size(huge.getvalue())
+
+    assert (width, height) == (12000, 12000)
+    assert refusal == "image-too-large"
+    assert "image-too-large" in ir.WITHHOLD_REASONS
+
+
+def test_a_rotated_photo_is_uprighted_before_either_half_sees_it():
+    """Vision honours the EXIF orientation tag and blur_regions does not, so a
+    portrait photo carrying Orientation=6 was described in one frame and blurred
+    in the other -- the box lands in the background and the face survives."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    image = Image.new("RGB", (400, 200), (10, 10, 10))
+    exif = image.getexif()
+    exif[0x0112] = 6                      # rotate 90 CW on display
+    image.save(buf, format="JPEG", exif=exif)
+
+    raw, width, height = ir.upright(buf.getvalue(), 400, 200)
+    assert (width, height) == (200, 400), "the tag was not baked into the pixels"
+    assert ir.image_size(raw) == (200, 400)
+
+    # An unrotated photo is handed straight back, no re-encode, no quality loss.
+    plain = io.BytesIO()
+    Image.new("RGB", (400, 200)).save(plain, format="JPEG")
+    same = plain.getvalue()
+    assert ir.upright(same, 400, 200)[0] is same
+
+
+def test_the_batch_says_which_slot_each_surviving_photo_came_from():
+    """Once a photo can be withheld, the result list is shorter than the input
+    and no longer lines up with it. A caller pairing them by position slides a
+    later photo into an earlier one's slot -- on a report carrying a "before"
+    and an "after", that swaps what each of them means. `kept` is what makes the
+    pairing recoverable."""
+    batch = ir.BatchResult()
+    batch.kept = [0, 2]
+    batch.media = ["redacted-first", "redacted-third"]
+    batch.withheld = [{"media": "raw-second", "reason": "provider-error"}]
+
+    rebuilt = dict(zip(batch.kept, batch.media))
+    assert rebuilt == {0: "redacted-first", 2: "redacted-third"}
+    assert rebuilt.get(1) is None, "the withheld slot must stay empty, not be back-filled"
