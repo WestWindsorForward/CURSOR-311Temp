@@ -6,8 +6,14 @@ import {
     Cloud, Activity, AlertTriangle, Cpu
 } from 'lucide-react';
 import { Card, Button } from './ui';
-import api, { HealthDashboard, RunbookResult, ProactiveHealth } from '../services/api';
+import api, { HealthDashboard, RunbookResult, ProactiveHealth, HealthCheck } from '../services/api';
+import type { ConnectorHealth } from '../types';
+import { ALERTING_STATUSES, hasAlert } from './capabilityUI';
 import { useDialog } from './DialogProvider';
+
+/* Same list the provider cards gate their mute button on, so "is this
+ * alerting?" cannot mean two different things in two places. */
+const ALERTING: readonly string[] = ALERTING_STATUSES;
 
 interface ServiceStatus {
     status: 'running' | 'stopped' | 'unknown' | 'error' | 'not_configured';
@@ -41,11 +47,90 @@ export default function OperationsPanel() {
         { working: number; failing: number; unchecked: number; names: string[] } | null
     >(null);
     const [proactive, setProactive] = useState<ProactiveHealth | null>(null);
+    const [systemProbes, setSystemProbes] = useState<ConnectorHealth[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [runbookLoading, setRunbookLoading] = useState<string | null>(null);
     const [lastAction, setLastAction] = useState<RunbookResult | null>(null);
+    /* Which check's mute is in flight, and any local override of the server's
+     * answer. The panel refetches every 30s, so without the override the row
+     * would snap back to its old state for up to half a minute after the click
+     * and read as a button that did nothing. */
+    const [mutingCheck, setMutingCheck] = useState<string | null>(null);
+    const [muteOverride, setMuteOverride] = useState<Record<string, string | null>>({});
+    /* Carries which row failed, so the message lands under that row's card
+     * rather than under both of them. */
+    const [muteError, setMuteError] = useState<{ id: string; message: string } | null>(null);
     const dialog = useDialog();
+
+    const mutedUntilOf = (c: HealthCheck): string | null =>
+        c.key in muteOverride ? muteOverride[c.key] : (c.muted ? (c.muted_until ?? null) : null);
+    const mutedNow = (c: HealthCheck): boolean =>
+        c.key in muteOverride ? muteOverride[c.key] !== null : !!c.muted;
+
+    /* Mute and unmute are the same endpoint; `days: 0` lifts it. Local state
+     * only moves on success -- a failed mute that greyed the row anyway would
+     * be the worst outcome available, an admin believing they have silenced an
+     * alarm that is still going to page them. */
+    const runMute = async (
+        id: string,
+        isMuted: boolean,
+        call: (days: number | undefined) => Promise<{ muted_until: string | null }>,
+    ) => {
+        setMutingCheck(id);
+        setMuteError(null);
+        try {
+            const r = await call(isMuted ? 0 : undefined);
+            setMuteOverride(prev => ({ ...prev, [id]: r.muted_until }));
+            fetchAll();
+        } catch (err: any) {
+            setMuteError({
+                id,
+                message: `${isMuted ? 'Alerts were not resumed' : 'Alerts were not paused'}: ${err?.message || 'the change did not save'}`,
+            });
+        } finally {
+            setMutingCheck(null);
+        }
+    };
+
+    const muteErrorFor = (ids: string[]) =>
+        muteError && ids.includes(muteError.id)
+            ? <p role="alert" className="text-xs mt-3 text-red-300">{muteError.message}</p>
+            : null;
+
+    const toggleCheckMute = (key: string, isMuted: boolean) =>
+        runMute(key, isMuted, days => api.muteHealthCheck(key, days));
+
+    const toggleProbeMute = (connector: string, isMuted: boolean) =>
+        runMute(connector, isMuted, days => api.muteConnectorAlerts(connector, days));
+
+    const probeMutedUntil = (c: ConnectorHealth): string | null =>
+        c.connector in muteOverride ? muteOverride[c.connector] : (c.alerts_muted_until ?? null);
+
+    /* One mute button for both surfaces, so "Mute alerts" cannot come to mean
+     * two different things two cards apart.
+     *
+     * A plain function, not a nested component: a component declared in the
+     * render body is a new element *type* every render, which remounts the
+     * button on every 30-second poll. */
+    const muteButton = ({ id, isMuted, label, onToggle }: {
+        id: string; isMuted: boolean; label: string; onToggle: () => void;
+    }) => (
+        <button
+            type="button"
+            onClick={onToggle}
+            disabled={mutingCheck !== null}
+            aria-label={isMuted ? `Unmute ${label}` : `Mute alerts for ${label}`}
+            title={isMuted
+                ? 'Start emailing administrators about this again'
+                : 'Stop emailing administrators about this for a week. The status stays as it is.'}
+            className="shrink-0 px-2.5 py-1 text-xs rounded-md border border-slate-600/60 text-gray-300 hover:text-white hover:border-slate-400/60 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+            {mutingCheck === id
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : (isMuted ? 'Unmute' : 'Mute alerts')}
+        </button>
+    );
 
     const fetchAll = async () => {
         setIsLoading(true);
@@ -65,6 +150,15 @@ export default function OperationsPanel() {
                  * inherit the alerting and the mute, but they belong to the
                  * panel above rather than to this roll-up. */
                 const external = connectorData.connectors.filter(c => !c.connector.startsWith('system:'));
+                /* The infrastructure probes email admins through the same
+                 * digest as every other connector, and until now they were
+                 * rendered nowhere at all -- an alert with no card and
+                 * therefore no way to acknowledge it. Only the ones actually
+                 * alerting, or already muted, earn a row. */
+                setSystemProbes(connectorData.connectors.filter(
+                    c => c.connector.startsWith('system:')
+                        && (ALERTING.includes(c.status) || !!c.alerts_muted_until)
+                ));
                 setConnectorRollup({
                     working: external.filter(c => c.status === 'working').length,
                     failing: external.filter(c => c.status === 'failing' || c.status === 'down').length,
@@ -317,20 +411,110 @@ export default function OperationsPanel() {
                         <div className="space-y-2">
                             {proactive.checks
                                 .filter(c => c.status === 'warning' || c.status === 'critical')
-                                .map(c => (
-                                    <div key={c.key} className="flex items-start gap-3 bg-slate-800/50 rounded-lg p-3 border border-slate-700/50">
-                                        <span className={`px-2 py-0.5 mt-0.5 text-xs rounded-full border shrink-0 ${getStatusBadge(c.status === 'critical' ? 'error' : 'fallback')}`}>
-                                            {c.status}
-                                        </span>
-                                        <div className="min-w-0">
-                                            <p className="text-white text-sm font-medium">{c.label}: <span className="font-normal text-gray-300">{c.message}</span></p>
-                                            {c.action && <p className="text-gray-400 text-xs mt-0.5">→ {c.action}</p>}
+                                .map(c => {
+                                    /* A muted check is still listed, and still
+                                     * carries its own status badge. Muting stops
+                                     * the mail; it is not a way to make the row
+                                     * look like it passed. The de-emphasis is on
+                                     * the row, never on the badge. */
+                                    const isMuted = mutedNow(c);
+                                    return (
+                                        <div
+                                            key={c.key}
+                                            data-testid={`health-check-${c.key}`}
+                                            data-muted={isMuted ? 'true' : 'false'}
+                                            className={`flex items-start gap-3 rounded-lg p-3 border ${isMuted
+                                                ? 'bg-slate-800/25 border-slate-700/30'
+                                                : 'bg-slate-800/50 border-slate-700/50'}`}
+                                        >
+                                            <span className={`px-2 py-0.5 mt-0.5 text-xs rounded-full border shrink-0 ${getStatusBadge(c.status === 'critical' ? 'error' : 'fallback')}`}>
+                                                {c.status}
+                                            </span>
+                                            <div className={`min-w-0 flex-1 ${isMuted ? 'opacity-60' : ''}`}>
+                                                <p className="text-white text-sm font-medium">
+                                                    {c.label}: <span className="font-normal text-gray-300">{c.message}</span>
+                                                </p>
+                                                {c.action && <p className="text-gray-400 text-xs mt-0.5">→ {c.action}</p>}
+                                                {isMuted && (
+                                                    <p className="text-xs mt-1.5 text-amber-200/85">
+                                                        Muted — nobody is being emailed about this
+                                                        {mutedUntilOf(c) ? ` until ${new Date(mutedUntilOf(c) as string).toLocaleDateString()}` : ''}.
+                                                        {' '}It is still not passing.
+                                                    </p>
+                                                )}
+                                            </div>
+                                            {muteButton({
+                                                id: c.key,
+                                                isMuted,
+                                                label: c.label,
+                                                onToggle: () => toggleCheckMute(c.key, isMuted),
+                                            })}
                                         </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                         </div>
+                        {muteErrorFor(proactive.checks.map(c => c.key))}
                     </Card>
                 )
+            )}
+
+            {/* Infrastructure probes.
+                These ride the connector health table, so they were already
+                emailing admins through the connector digest -- but they were
+                rendered nowhere, which meant an alert with no card and so no
+                way to say "I know about this one". Only the probes actually
+                alerting, or already muted, get a row: a list of five green
+                lines would be noise of its own. */}
+            {systemProbes.length > 0 && (
+                <Card>
+                    <h3 className="text-lg font-semibold text-white mb-1 flex items-center gap-2">
+                        <Server className="w-5 h-5 text-cyan-400" />
+                        Infrastructure probes
+                    </h3>
+                    <p className="text-gray-400 text-xs mb-3">
+                        Checked hourly. Admins are emailed while one is failing.
+                    </p>
+                    <div className="space-y-2">
+                        {systemProbes.map(c => {
+                            const until = probeMutedUntil(c);
+                            const isMuted = !!until;
+                            const label = c.connector.replace(/^system:/, '');
+                            return (
+                                <div
+                                    key={c.connector}
+                                    data-testid={`system-probe-${label}`}
+                                    data-muted={isMuted ? 'true' : 'false'}
+                                    className={`flex items-start gap-3 rounded-lg p-3 border ${isMuted
+                                        ? 'bg-slate-800/25 border-slate-700/30'
+                                        : 'bg-slate-800/50 border-slate-700/50'}`}
+                                >
+                                    <span className={`px-2 py-0.5 mt-0.5 text-xs rounded-full border shrink-0 ${getStatusBadge(hasAlert(c.status) ? 'error' : 'unknown')}`}>
+                                        {c.status}
+                                    </span>
+                                    <div className={`min-w-0 flex-1 ${isMuted ? 'opacity-60' : ''}`}>
+                                        <p className="text-white text-sm font-medium capitalize">
+                                            {label}: <span className="font-normal text-gray-300">{c.summary}</span>
+                                        </p>
+                                        {isMuted && (
+                                            <p className="text-xs mt-1.5 text-amber-200/85">
+                                                Muted — nobody is being emailed about this
+                                                {` until ${new Date(until as string).toLocaleDateString()}`}.
+                                                {' '}It is still not working.
+                                            </p>
+                                        )}
+                                    </div>
+                                    {muteButton({
+                                        id: c.connector,
+                                        isMuted,
+                                        label,
+                                        onToggle: () => toggleProbeMute(c.connector, isMuted),
+                                    })}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {muteErrorFor(systemProbes.map(c => c.connector))}
+                </Card>
             )}
 
             {/* Infrastructure Services */}

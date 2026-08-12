@@ -339,8 +339,14 @@ async def notify(db, *, health=None, alerts=None, dispatch=None) -> Dict[str, An
         # and a deleted integration has no card, hence no mute button. Only
         # rows for currently-enabled integrations may alert.
         enabled_keys = {health_key(i.platform) for i in await _enabled_integrations(db)}
+        # `health:` rows are not connectors at all -- they exist only to carry
+        # the mute for a proactive health check, which has its own alerting
+        # task. Left in, they would arrive here as connectors nothing has ever
+        # verified and earn a digest line each sweep.
+        from app.services import health_mutes
         healths = [h for h in snapshot.values()
                    if h.connector not in off
+                   and not health_mutes.is_health_row(h.connector)
                    and (not h.connector.startswith("govtech:") or h.connector in enabled_keys)]
         return await dispatch(
             db,
