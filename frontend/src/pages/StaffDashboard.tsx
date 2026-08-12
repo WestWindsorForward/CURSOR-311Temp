@@ -2394,6 +2394,58 @@ export default function StaffDashboard() {
                                                 </div>
                                             )}
 
+                                            {/* Photos the automatic blur could not clear. They are
+                                                held out of media_urls entirely, so nothing public
+                                                can render one -- this panel is the only place they
+                                                appear and the only way one ever becomes public. */}
+                                            {!!selectedRequest.media_pending_review?.length && (
+                                                <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                                                    <p className="text-sm text-amber-200 font-medium mb-1">
+                                                        {selectedRequest.media_pending_review.length === 1
+                                                            ? '1 photo needs your review'
+                                                            : `${selectedRequest.media_pending_review.length} photos need your review`}
+                                                    </p>
+                                                    <p className="text-xs text-amber-200/70 mb-3">
+                                                        The automatic face and licence-plate blur could not run on
+                                                        these, so they have been kept off the public tracker, the map
+                                                        and the Open311 feed. Check for faces and plates before
+                                                        releasing one.
+                                                    </p>
+                                                    <div className="flex gap-3 flex-wrap">
+                                                        {selectedRequest.media_pending_review.map((photo, i) => (
+                                                            <div key={i} className="space-y-1">
+                                                                <img
+                                                                    src={photo.media}
+                                                                    alt={`Photo awaiting review ${i + 1}`}
+                                                                    className="w-28 h-20 object-cover rounded-lg cursor-pointer ring-1 ring-amber-400/40"
+                                                                    onClick={() => setLightboxUrl(photo.media)}
+                                                                />
+                                                                <div className="flex gap-1">
+                                                                    <button
+                                                                        type="button"
+                                                                        className="px-2 py-1 text-xs rounded bg-emerald-600/80 hover:bg-emerald-600 text-white"
+                                                                        onClick={async () => setSelectedRequest(
+                                                                            await api.reviewWithheldPhoto(
+                                                                                selectedRequest.service_request_id, i, true))}
+                                                                    >
+                                                                        Publish
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/20 text-white/80"
+                                                                        onClick={async () => setSelectedRequest(
+                                                                            await api.reviewWithheldPhoto(
+                                                                                selectedRequest.service_request_id, i, false))}
+                                                                    >
+                                                                        Discard
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
                                             {/* AI Analysis - Premium Enhanced Display (Now BELOW Photos) */}
                                             {(() => {
                                                 const ai = selectedRequest.ai_analysis as any;

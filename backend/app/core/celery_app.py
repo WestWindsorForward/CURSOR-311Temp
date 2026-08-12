@@ -105,6 +105,13 @@ celery_app.conf.update(
             "task": "app.tasks.service_requests.enforce_retention_policy",
             "schedule": crontab(hour=1, minute=0)
         },
+        # Photos screened at pick time that no report ever claimed. Hourly,
+        # because the handles only live an hour and because every unclaimed row
+        # is a full-size image written by an unauthenticated endpoint.
+        "hourly-photo-handle-reap": {
+            "task": "app.tasks.service_requests.reap_expired_photo_handles",
+            "schedule": crontab(minute=40)
+        },
         # Daily purge of IP addresses older than 90 days (privacy commitment)
         "daily-ip-purge": {
             "task": "app.tasks.service_requests.purge_old_ip_addresses",

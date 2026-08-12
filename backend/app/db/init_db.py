@@ -196,6 +196,11 @@ async def _run_schema_migrations():
         # safe direction: a host push is refused rather than a town's key being
         # overwritten by one.
         "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS host_provided_keys JSON",
+        # Photos the redactor could not clear, held back from every public
+        # surface until staff look at them (added 2026-08-12). NULL reads as
+        # "nothing waiting", which is the right answer for every report filed
+        # before this existed -- the old behaviour published those photos.
+        "ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS media_pending_review JSON",
         # GovTech integrations: comment/document sync tracking (added 2026-07-01)
         "ALTER TABLE request_comments ADD COLUMN IF NOT EXISTS external_ref VARCHAR(200)",
         "CREATE INDEX IF NOT EXISTS ix_request_comments_external_ref ON request_comments (external_ref)",

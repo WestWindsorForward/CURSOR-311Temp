@@ -495,15 +495,29 @@ async def test_an_explicit_photo_blocks_and_is_not_blurred(monkeypatch, spy):
 
 
 @pytest.mark.asyncio
-async def test_a_vision_outage_fails_open_rather_than_dropping_the_photo(monkeypatch, spy):
+async def test_a_vision_outage_withholds_the_photo_rather_than_publishing_it(monkeypatch, spy):
+    """The failure direction that matters.
+
+    This used to fail *open*: Vision times out, the original bytes go straight
+    into media_urls, a note lands in `skipped` where nobody reads it, and a
+    municipal website publishes an unblurred face. Nothing ever looked at the
+    photo, so "no detections" was never established -- the only honest thing to
+    say is that we do not know.
+
+    A photo we could not screen is now withheld instead: absent from `media`,
+    present in `withheld` with its reason, and parked by the caller for staff.
+    The report itself still goes through, which is the half that must not
+    regress -- a Google outage must not cost a resident their pothole report.
+    """
     async def boom(raw, features):
         raise RuntimeError("vision down")
     monkeypatch.setattr("app.services.cloud_moderation.vision_annotate", boom)
     _configure(monkeypatch, "google")
     verdict, batch = await ir.screen_and_redact([PHOTO])
     assert not verdict.should_block
-    assert batch.media == [PHOTO]
+    assert batch.media == []
     assert "provider-error" in batch.skipped
+    assert batch.withheld == [{"media": PHOTO, "reason": "provider-error"}]
 
 
 @pytest.mark.asyncio

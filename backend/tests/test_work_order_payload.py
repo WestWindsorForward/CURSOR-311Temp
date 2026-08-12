@@ -104,6 +104,14 @@ NEVER = {
     # report into a system the retention policy cannot reach -- the scrub
     # clears these columns here and would leave the vendor's copy untouched.
     "ai_analysis", "ai_summary", "ai_classification", "ai_analyzed_at",
+    # Photos the redactor could not clear. These are UNREDACTED -- the whole
+    # reason they are held out of media_urls is that nothing ever established
+    # there is no face in them -- and they are waiting on a staff decision that
+    # has not been made. Pushing one to a vendor would copy, into a system our
+    # retention policy cannot reach, exactly the image we declined to publish
+    # ourselves. A photo staff release moves into media_urls and travels the
+    # normal way from there.
+    "media_pending_review",
 }
 
 

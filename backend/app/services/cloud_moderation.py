@@ -278,13 +278,30 @@ async def _google_text(text: str) -> Optional[ModerationResult]:
         return google_text_severity(resp.json().get("moderationCategories", []))
 
 
+# Read timeout for one images:annotate call.
+#
+# Was 20s, chosen when the full-size phone photo went up the wire and the upload
+# could genuinely take that long. Two things changed. The bytes are now a
+# downscaled copy (see image_redaction.SCREEN_MAX_EDGE), roughly a twentieth of
+# the payload, so the upload term that justified 20s is gone. And a failure no
+# longer publishes the photo unredacted -- it withholds it for staff review --
+# so waiting longer no longer buys safety, it only buys a longer wait before the
+# same fallback.
+#
+# 12s is roughly 4x the p99 of an annotate on a ~200KB image. Long enough that a
+# slow-but-working Vision still answers, short enough that a wedged one is a
+# noticeable pause rather than an abandoned form.
+VISION_TIMEOUT_SECONDS = 12.0
+
+
 async def vision_annotate(raw: bytes, features: List[Dict[str, Any]]) -> Dict[str, Any]:
     """One images:annotate call, however many features are asked for.
 
     Vision bills per feature but charges one round trip for the batch, so
     SafeSearch + face + text together cost three feature-units and one HTTPS
-    request rather than three. That matters because this runs on the resident's
-    latency budget while they wait for a submit button.
+    request rather than three. That matters because this runs on a resident's
+    latency budget -- at photo-pick time on the portal, and still at submit time
+    for API clients that post media directly.
 
     Returns {} when Google is not configured, so callers can treat "no
     credentials" the same as "nothing detected".
@@ -295,7 +312,9 @@ async def vision_annotate(raw: bytes, features: List[Dict[str, Any]]) -> Dict[st
         return {}
     body = {"requests": [{"image": {"content": base64.b64encode(raw).decode("ascii")},
                           "features": features}]}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=6.0)) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(VISION_TIMEOUT_SECONDS, connect=5.0)
+    ) as client:
         resp = await client.post("https://vision.googleapis.com/v1/images:annotate",
                                  headers={"Authorization": f"Bearer {token}"}, json=body)
         resp.raise_for_status()

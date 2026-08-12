@@ -1036,6 +1036,40 @@ def notify_staff_of_activity(request_id: int, event: str, actor: str = None):
 
 
 @celery_app.task
+def reap_expired_photo_handles():
+    """Delete photos screened at pick time that no report ever claimed.
+
+    The resident portal screens a photo when it is chosen and hands the browser
+    a handle; the handle is spent -- and the row deleted -- when the report is
+    submitted. Residents abandon forms, so a fraction of those rows are never
+    spent, and every one of them is a full-size image in a table an
+    unauthenticated endpoint can write to.
+
+    Hourly, because the handles only live an hour. Anything past `expires_at`
+    is already unredeemable, so this deletes nothing a submission could still
+    have used.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    async def _reap():
+        from app.services import photo_handles
+
+        async with SessionLocal() as db:
+            gone = await photo_handles.reap(db)
+            await db.commit()
+            if gone:
+                logger.info("[Photo handles] Reaped %d unclaimed screened photo(s)", gone)
+            return {"status": "success", "reaped": gone}
+
+    try:
+        return run_async(_reap())
+    except Exception as e:
+        logger.error(f"[Photo handles] Reap failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@celery_app.task
 def purge_old_ip_addresses():
     """Null out IP addresses older than 90 days.
 

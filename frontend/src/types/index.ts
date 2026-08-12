@@ -189,12 +189,23 @@ export interface PublicServiceRequest {
     assigned_department_name: string | null;
 }
 
+/** A photo the redactor could not clear, waiting on a staff decision. */
+export interface PendingReviewPhoto {
+    media: string;
+    /** provider-error | error | no-detector | blur-failed */
+    reason?: string;
+}
+
 export interface ServiceRequestDetail extends ServiceRequest {
     first_name: string | null;
     last_name: string | null;
     email: string;
     phone: string | null;
     media_urls: string[];  // Array of photo URLs
+    /** Photos held back from every public surface because the face and plate
+     *  blur could not be completed — a detector timeout or outage. Unredacted,
+     *  staff-only, and published only if a staff member releases one. */
+    media_pending_review?: PendingReviewPhoto[];
     /** Platforms this request exists in. Empty means the work-order
      *  refresh has nothing to pull, so the button is not offered. */
     external_links?: string[];

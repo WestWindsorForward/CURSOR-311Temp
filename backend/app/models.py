@@ -251,6 +251,22 @@ class ServiceRequest(Base):
     source = Column(String(50), default="resident_portal")  # resident_portal, phone, walk_in, email
     media_urls = Column(JSON, default=[])  # Array of up to 3 photo URLs/base64
 
+    # Photos the redactor could not clear, parked out of sight of every public
+    # surface: [{"media": <data URI>, "reason": "provider-error"|...}].
+    #
+    # Deliberately a separate column rather than a flag alongside media_urls.
+    # Every public path in the system -- the Open311 API, the map, the research
+    # export, a public-records response -- reads media_urls, and each of them is
+    # a place to forget a filter. A photo that is not in that column cannot be
+    # published by forgetting anything.
+    #
+    # Reached when the detector times out or errors: we do not know whether
+    # there is a face in the photo, so it is neither published nor thrown away.
+    # Staff look at it and release it into media_urls if it is fine. The report
+    # itself goes through either way -- a moderation outage must not cost a
+    # resident their pothole report.
+    media_pending_review = Column(JSON, default=[])
+
     # Public-feed visibility, chosen by the resident at submission.
     #   True  (default) - appears in the public feed/map and public list APIs
     #   False ("unlisted") - excluded from every public listing, but still fully
@@ -1166,3 +1182,65 @@ class ClientErrorLog(Base):
 
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class ScreenedPhoto(Base):
+    """A photo already moderated and blurred, waiting for the report it belongs to.
+
+    Why this table exists
+    ---------------------
+    Screening runs against Google Vision, and Vision is a network round trip. It
+    used to happen inside the create-request POST, so a resident who attached a
+    photo pressed Submit and then watched a generic spinner for as long as the
+    upload and the annotate took -- on a phone, with a 6MB photo, long enough
+    that the form reads as broken and people press Submit again.
+
+    Nothing about that work needs to happen at submit time. The photo is chosen
+    minutes earlier, while the resident is still typing the description and
+    dragging the pin. So the portal uploads and screens it *then*, in the
+    background, and by the time Submit is pressed the answer is already known
+    and the POST carries a handle instead of six megabytes of base64.
+
+    What is stored
+    --------------
+    The REDACTED bytes, and only those. The blur is destructive and is applied
+    before this row is written, exactly as it is on the inline path -- see
+    image_redaction's module docstring for why there is deliberately no
+    unredacted original anywhere in the system. A photo that came back blocked
+    or unverifiable stores no bytes at all.
+
+    Lifetime
+    --------
+    Short. A handle is minted at photo-pick time and spent at submit time,
+    usually within a couple of minutes; `expires_at` gives it an hour, which is
+    a generous form-filling session. Rows are deleted when spent and reaped
+    hourly when they are not, because this table is resident-writable and every
+    row is a full-size image sitting in the database.
+    """
+
+    __tablename__ = "screened_photos"
+
+    id = Column(Integer, primary_key=True)
+
+    # The opaque handle the client holds. 32 random bytes, urlsafe-base64, so it
+    # cannot be guessed and cannot be walked -- possession of the token is the
+    # only authorisation, because the resident who uploaded the photo has no
+    # account to authenticate as.
+    token = Column(String(64), unique=True, nullable=False, index=True)
+
+    # ready | blocked | needs_review
+    #   ready         screened clean; `media` holds the redacted photo
+    #   blocked       SafeSearch says explicit; `media` is NULL and the resident
+    #                 was told at pick time that the photo cannot be used
+    #   needs_review  the screen could not be completed; `media` is NULL and the
+    #                 raw bytes were never persisted, so the client must resend
+    #                 them with the report and take the inline path
+    verdict = Column(String(20), nullable=False, default="ready")
+    reason = Column(String(64), default="")
+
+    media = Column(Text)                      # redacted data URI, or NULL
+    faces = Column(Integer, default=0, nullable=False)
+    plates = Column(Integer, default=0, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)

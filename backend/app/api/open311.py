@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Body
+from fastapi import APIRouter, Depends, File, HTTPException, status, Query, Request, Body, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
@@ -695,6 +695,108 @@ async def list_open311_services(db: AsyncSession = Depends(get_db)):
     ]
 
 
+# A phone photo is a few megabytes; three of them plus form overhead is the
+# realistic ceiling for one submission. Anything past this is refused before the
+# bytes are read into memory rather than after.
+MAX_SCREEN_BYTES = 12 * 1024 * 1024
+
+
+@router.post("/photos/screen")
+# Unauthenticated, like the rest of resident intake -- a resident has no account
+# to sign in to. But unlike the rest of it this endpoint spends money on every
+# call (a Vision annotate) and holds an image in the database, so it is limited
+# harder than create_request's 10/minute. Twelve is four full three-photo forms
+# a minute from one address, which no real resident approaches and which caps an
+# abusive client's spend at something a town would not notice on a bill.
+@limiter.limit("12/minute")
+async def screen_photo(
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Moderate and blur one photo now, and hand back a handle for it.
+
+    This is the same screening the create-request POST does, moved off the
+    Submit button and onto the moment the resident picks the photo -- see
+    photo_handles for why. The resident is still typing their description while
+    this runs, so the round trip costs them nothing, and by the time they press
+    Submit the answer is already in the database.
+
+    Additive, not a replacement: an Open311 client or a connector that POSTs
+    media_urls directly still gets the inline screen at submit time, unchanged.
+
+    The bytes that come back out are the REDACTED ones. The original is decoded,
+    screened, blurred and dropped inside this call and is never written
+    anywhere, which is the same guarantee the inline path makes -- see
+    image_redaction's module docstring.
+    """
+    import base64
+
+    raw = await file.read(MAX_SCREEN_BYTES + 1)
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty upload")
+    if len(raw) > MAX_SCREEN_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="That photo is too large. Please pick one under 12 MB.",
+        )
+
+    mime = (file.content_type or "").lower()
+    if not mime.startswith("image/"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="That file is not an image.")
+
+    from app.services import image_redaction, photo_handles
+
+    media = f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+    verdict, batch = await image_redaction.screen_and_redact([media])
+
+    if verdict.should_block:
+        # Told now, while the resident is still looking at the photo they just
+        # chose, instead of after they have filled in the whole form. No bytes
+        # are stored: the handle exists only so the submit path can recognise
+        # and refuse it if the client sends it anyway.
+        handle = await photo_handles.mint(db, verdict="blocked", reason="explicit")
+        await db.commit()
+        return {
+            "handle": handle,
+            "status": "blocked",
+            "message": "This photo appears to contain explicit or graphic content and "
+                       "can't be used. Please choose a different one.",
+        }
+
+    if batch.withheld or not batch.media:
+        # The detector could not be reached or could not blur. The report must
+        # still be submittable, so the client resends these bytes with the
+        # report and they land in media_pending_review for staff -- we do not
+        # keep an unscreened original here.
+        reason = (batch.withheld[0]["reason"] if batch.withheld else "no-result")
+        handle = await photo_handles.mint(db, verdict="needs_review", reason=reason)
+        await db.commit()
+        return {
+            "handle": handle,
+            "status": "needs_review",
+            "reason": reason,
+            "message": "We couldn't check this photo automatically. It will be attached "
+                       "for a staff member to review before it appears publicly.",
+        }
+
+    handle = await photo_handles.mint(
+        db, verdict="ready", media=batch.media[0], faces=batch.faces, plates=batch.plates,
+    )
+    await db.commit()
+    return {
+        "handle": handle,
+        "status": "ready",
+        "faces": batch.faces,
+        "plates": batch.plates,
+        # The redacted image, so the thumbnail the resident sees is the one the
+        # town will actually publish -- blurred faces and all. Showing them the
+        # unblurred original they picked would misrepresent what gets stored.
+        "preview": batch.media[0],
+    }
+
+
 @router.post("/requests.json", response_model=ServiceRequestResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
 async def create_request(
@@ -746,8 +848,39 @@ async def create_request(
     # image_redaction -- so no unredacted copy exists to leak through the
     # Open311 API, the research export or a public-records response. The EXIF block goes
     # too, which is the larger privacy win and costs nothing.
-    from app.services import image_redaction
-    verdict, redacted = await image_redaction.screen_and_redact(request_data.media_urls)
+    # Photos the resident's browser already had screened at pick time arrive as
+    # handles and are redeemed here without touching Vision again -- see
+    # photo_handles. Everything else (an Open311 client posting base64, a
+    # connector posting a hosted URL) still goes down the inline path below,
+    # unchanged.
+    from app.services import image_redaction, photo_handles
+    resolved = await photo_handles.resolve(db, request_data.media_urls)
+    if resolved.stale:
+        # The handle expired or was already spent, and its bytes were never
+        # kept, so the server cannot fall back on its own. Say so precisely
+        # enough that the client can resubmit those photos inline -- it still
+        # holds them. Dropping them silently is the one outcome the resident
+        # would never notice.
+        logger.info("[CREATE REQUEST] %d stale photo handle(s); asking client to resend",
+                    len(resolved.stale))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "stale_photo_handles",
+                "handles": resolved.stale,
+                "message": "Your photos took too long to attach. Please try submitting again.",
+            },
+        )
+    if resolved.blocked:
+        logger.info("[CREATE REQUEST] blocked: explicit image (screened at pick time)")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="One of your photos appears to contain explicit or graphic content and "
+                   "can't be submitted. Please remove it and try again.",
+        )
+
+    inline_media = [value for _, value in resolved.inline]
+    verdict, redacted = await image_redaction.screen_and_redact(inline_media)
     if verdict.should_block:
         logger.info("[CREATE REQUEST] blocked: explicit image")
         raise HTTPException(
@@ -755,10 +888,31 @@ async def create_request(
             detail="One of your photos appears to contain explicit or graphic content and "
                    "can't be submitted. Please remove it and try again.",
         )
-    request_data.media_urls = redacted.media
-    if redacted.changed:
-        logger.info("[CREATE REQUEST] redacted %d face(s), %d plate(s)",
-                    redacted.faces, redacted.plates)
+
+    # Rebuild the resident's ordering: the screened half kept the index it had
+    # in the submitted list, the inline half comes back in its own order, minus
+    # anything the redactor withheld.
+    slots = dict(resolved.screened)
+    inline_out = list(redacted.media)
+    for index, _ in resolved.inline:
+        if inline_out:
+            slots[index] = inline_out.pop(0)
+    request_data.media_urls = [slots[i] for i in sorted(slots)] + inline_out
+
+    # Photos the detector could not clear. They are NOT put in media_urls -- see
+    # ServiceRequest.media_pending_review -- so no public surface can render one
+    # by forgetting a filter, and the report itself still goes through.
+    pending_review = [p for p in (list(resolved.withheld) + list(redacted.withheld))
+                      if p.get("media")]
+    if pending_review:
+        logger.warning("[CREATE REQUEST] %d photo(s) held for staff review: %s",
+                       len(pending_review),
+                       ", ".join(sorted({p.get("reason", "") for p in pending_review})))
+
+    faces = redacted.faces + resolved.faces
+    plates = redacted.plates + resolved.plates
+    if faces or plates:
+        logger.info("[CREATE REQUEST] redacted %d face(s), %d plate(s)", faces, plates)
 
     # Jurisdiction check. This used to live only in the resident portal's
     # JavaScript, so a report POSTed straight at this endpoint ignored road
@@ -800,6 +954,7 @@ async def create_request(
         phone=request_data.phone,
         preferred_language=request_data.preferred_language or "en",  # Capture user's UI language
         media_urls=request_data.media_urls[:3] if request_data.media_urls else [],  # Limit to 3 photos
+        media_pending_review=pending_review[:3],
         matched_asset=request_data.matched_asset,
         is_public=await resolve_is_public(db, request_data.is_public),
         custom_fields=request_data.custom_fields,
@@ -1210,6 +1365,63 @@ async def set_public_archived(
     return request
 
 
+@router.post("/requests/{request_id}/media/{index}/review",
+             response_model=ServiceRequestDetailResponse)
+async def review_withheld_photo(
+    request_id: str,
+    index: int,
+    release: bool = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_staff),
+):
+    """Publish or discard a photo the redactor could not clear (staff).
+
+    These arrive when the detector times out or errors, which used to mean the
+    photo was published unredacted with a note in a log nobody reads. Now it
+    waits here instead: `release=true` moves it into media_urls exactly as if it
+    had been cleared, `release=false` deletes it.
+
+    A human looking at the photo is the whole point -- the machine already said
+    it does not know. Both outcomes are audited, because "who decided to publish
+    the photo with the face in it" is a question a town will eventually be
+    asked.
+    """
+    result = await db.execute(
+        select(ServiceRequest).options(selectinload(ServiceRequest.assigned_department)).where(
+            ServiceRequest.service_request_id == request_id, *direct_link_filters())
+    )
+    sr = result.scalar_one_or_none()
+    if not sr:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    pending = list(sr.media_pending_review or [])
+    if index < 0 or index >= len(pending):
+        raise HTTPException(status_code=404, detail="No photo awaiting review at that position")
+
+    entry = pending.pop(index)
+    if release:
+        media = list(sr.media_urls or [])
+        media.append(entry.get("media"))
+        sr.media_urls = media[:3]
+    sr.media_pending_review = pending
+    sr.updated_datetime = datetime.now(timezone.utc)
+
+    db.add(RequestAuditLog(
+        service_request_id=sr.id,
+        action="withheld_photo_review",
+        old_value=f"withheld:{entry.get('reason', '')}",
+        new_value="released" if release else "discarded",
+        actor_type="admin" if current_user.role == "admin" else "staff",
+        actor_name=current_user.username,
+    ))
+
+    await db.commit()
+    await db.refresh(sr)
+    if sr.assigned_department_id:
+        await db.refresh(sr, ['assigned_department'])
+    return sr
+
+
 @router.post("/requests/manual", response_model=ServiceRequestResponse, status_code=status.HTTP_201_CREATED)
 async def create_manual_intake(
     intake_data: ManualIntakeCreate,
@@ -1246,6 +1458,14 @@ async def create_manual_intake(
     from app.services import image_redaction
     intake_redacted = await image_redaction.redact_media(intake_data.media_urls)
     intake_data.media_urls = intake_redacted.media
+
+    # A photo the redactor could not clear is held back here too, rather than
+    # published unblurred. The clerk is a member of staff and can release it
+    # from the request itself -- often immediately, since they are usually
+    # looking at the photo already.
+    intake_pending = [p for p in intake_redacted.withheld if p.get("media")][:3]
+    if intake_pending:
+        logger.warning("[MANUAL INTAKE] %d photo(s) held for staff review", len(intake_pending))
 
     # Same jurisdiction rules as a resident submission, but a staffer may
     # knowingly override them. A clerk on the phone can see that the caller is
@@ -1290,6 +1510,7 @@ async def create_manual_intake(
         phone=intake_data.phone,
         preferred_language=intake_data.preferred_language or "en",
         media_urls=intake_data.media_urls[:3] if intake_data.media_urls else [],
+        media_pending_review=intake_pending,
         matched_asset=intake_data.matched_asset,
         is_public=await resolve_is_public(db, intake_data.is_public),
         custom_fields=intake_data.custom_fields,
