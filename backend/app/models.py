@@ -606,6 +606,20 @@ class SystemSettings(Base):
     # host can no longer touch it. See app/services/host_secrets.py.
     host_provided_keys = Column(JSON, default=[])
 
+    # The operator answering the "Register your deployment" prompt once, for the
+    # whole deployment. This is a different act from the per-browser dismissal
+    # in components/StayInformed.tsx: that is one person putting a nudge aside
+    # for themselves, which is why it lives in their localStorage. This says the
+    # question has been settled for the instance -- typically because it is a
+    # demo or a fleet member that registered elsewhere -- so the prompt stops
+    # appearing for everybody, in every browser.
+    #
+    # False on every existing install and on every new one: an operator has to
+    # say so, and until they do nothing changes.
+    registration_prompt_dismissed = Column(
+        Boolean, default=False, server_default='false', nullable=False
+    )
+
     # Last-seen status per proactive health check ({check_key: status}), so the
     # alerting task only emails admins when a check crosses into a worse state.
     health_alert_state = Column(JSON, default={})

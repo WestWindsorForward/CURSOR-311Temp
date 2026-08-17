@@ -611,6 +611,14 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
      * would invite somebody to register and the modal it opens would show them
      * the built-in form instead. */
     const [contactFormUrl, setContactFormUrl] = useState('');
+    /* The operator has answered the registration question for this deployment
+     * (system_settings.registration_prompt_dismissed), so the block below is not
+     * shown at all -- neither shape of it. Unlike the modal and the banner this
+     * one was never dismissible in the first place, which is exactly why it
+     * needs the flag: it is the surface that would otherwise keep asking
+     * forever. Defaults to false, so a config read that fails leaves the page
+     * as it has always been. */
+    const [registrationDismissed, setRegistrationDismissed] = useState(false);
     /* Which provider each capability is on, and which are set up.
      *
      * Per provider, not per capability: "maps is configured" was true if any
@@ -702,6 +710,7 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
                 setManagedMode(!!cfg?.managed_mode);
                 setPublicOrigin(cfg?.public_origin ?? null);
                 setContactFormUrl(buildContactFormUrl(cfg?.contact_form_url));
+                setRegistrationDismissed(cfg?.registration_prompt_dismissed === true);
             })
             .catch(() => setManagedMode(false));
     }, []);
@@ -1170,8 +1179,14 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
                   * Two shapes: when the operator hosts a registration form
                   * (CONTACT_FORM_URL), an invitation that opens it inside the
                   * console; otherwise the built-in contact form, so a
-                  * self-hoster without a form loses nothing. */}
-                {contactFormUrl ? (
+                  * self-hoster without a form loses nothing.
+                  *
+                  * Three, counting absent. An operator who has answered the
+                  * question for the deployment gets neither shape: this is the
+                  * one registration surface with no dismissal of its own, so
+                  * without the flag it would go on asking a deployment that has
+                  * already registered. */}
+                {!registrationDismissed && (contactFormUrl ? (
                     <div className="mt-4 pt-3 border-t border-white/10">
                         {/* A button, not a link. The form opens inside the
                           * console -- `immediate` tells the host that this click
@@ -1215,7 +1230,7 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
                             Register a contact (optional)
                         </button>
                     </div>
-                )}
+                ))}
             </motion.div>
 
             {/* ── Setup Instructions (collapsible) ── */}
