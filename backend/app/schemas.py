@@ -401,6 +401,13 @@ class SystemSettingsBase(BaseModel):
     # everything stays listed. Optional so exclude_unset keeps a settings save
     # that never mentions it from clearing a configured policy.
     public_archive_days: Optional[int] = None
+    # Whether the operator has answered the "Register your deployment" prompt for
+    # the whole deployment, rather than each visitor answering it for their own
+    # browser. False is the only sane default: an instance that has never said
+    # so keeps the per-browser prompt it has always had. Saves that never
+    # mention it leave the stored value alone (exclude_unset in update_settings),
+    # so an older console cannot switch it back off by omission.
+    registration_prompt_dismissed: bool = False
 
     @field_validator('public_archive_days', mode='before')
     @classmethod

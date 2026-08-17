@@ -35,6 +35,10 @@ export interface SystemConfig {
     contact_form_url?: string;
     /** Whether that form may be shown in a frame inside the console. */
     contact_form_embed?: boolean;
+    /** The operator has answered the registration prompt for the whole
+     *  deployment, so it is not shown to anybody. Absent or false means the
+     *  per-browser dismissal decides, as it always has. */
+    registration_prompt_dismissed?: boolean;
 }
 
 // GovTech platform integration types

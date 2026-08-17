@@ -196,6 +196,11 @@ async def _run_schema_migrations():
         # safe direction: a host push is refused rather than a town's key being
         # overwritten by one.
         "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS host_provided_keys JSON",
+        # The operator answering the "Register your deployment" prompt for the
+        # whole deployment rather than for one browser (added 2026-08-17).
+        # False everywhere until somebody switches it on, so the per-browser
+        # dismissal keeps deciding exactly as it did.
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS registration_prompt_dismissed BOOLEAN NOT NULL DEFAULT false",
         # GovTech integrations: comment/document sync tracking (added 2026-07-01)
         "ALTER TABLE request_comments ADD COLUMN IF NOT EXISTS external_ref VARCHAR(200)",
         "CREATE INDEX IF NOT EXISTS ix_request_comments_external_ref ON request_comments (external_ref)",

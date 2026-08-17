@@ -134,3 +134,37 @@ describe('the registration touchpoint on the setup tracker', () => {
         expect(host.textContent).not.toContain('Microsoft Forms');
     });
 });
+
+describe('when the operator has answered for the whole deployment', () => {
+    /* `registration_prompt_dismissed` on the public config. This block has no
+     * dismissal of its own -- it is deliberately the standing way back to the
+     * form -- so it is the surface that would otherwise go on asking a
+     * deployment that registered long ago. Both shapes have to go, not just the
+     * operator-form one. */
+    it('shows neither shape of the touchpoint', async () => {
+        state.systemConfig = {
+            contact_form_url: 'https://forms.office.com/r/example',
+            registration_prompt_dismissed: true,
+        };
+        await mount();
+
+        expect(host.textContent).not.toContain('Register your deployment');
+        expect(host.textContent).not.toContain('Microsoft Forms');
+    });
+
+    it('hides the built-in fallback too, when no operator form is configured', async () => {
+        state.systemConfig = { contact_form_url: '', registration_prompt_dismissed: true };
+        await mount();
+
+        expect(host.textContent).not.toContain('Register a contact');
+    });
+
+    it('leaves the touchpoint alone when the flag is false', async () => {
+        // The default, and the thing that must not move: a town that has not
+        // switched this on sees exactly what it saw before the setting existed.
+        state.systemConfig = { contact_form_url: '', registration_prompt_dismissed: false };
+        await mount();
+
+        expect(host.textContent).toContain('Register a contact');
+    });
+});

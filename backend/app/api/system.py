@@ -113,6 +113,23 @@ async def get_deployment_config(db: AsyncSession = Depends(get_db)):
         # must not take a working language switcher off the page.
         translation_enabled = True
 
+    # Whether the operator has answered the registration prompt for the whole
+    # deployment. It rides on this payload rather than an endpoint of its own
+    # because the console already reads this before deciding what the prompt
+    # looks like -- one request decides whether to show it and how.
+    #
+    # An unreadable settings row reads as "not dismissed", which leaves the
+    # prompt exactly where it has always been. The failure direction that
+    # matters is the other one: a database hiccup must not be able to hide the
+    # only channel a town has for security advisories.
+    try:
+        settings_row = await read_settings_row(db)
+        registration_prompt_dismissed = bool(
+            getattr(settings_row, "registration_prompt_dismissed", False)
+        )
+    except Exception:
+        registration_prompt_dismissed = False
+
     return {
         "managed_mode": app_settings.managed_mode,
         "app_version": app_settings.app_version,
@@ -124,6 +141,11 @@ async def get_deployment_config(db: AsyncSession = Depends(get_db)):
         # the console rather than opened in a new tab.
         "contact_form_url": (app_settings.contact_form_url or "").strip(),
         "contact_form_embed": bool(app_settings.contact_form_embed),
+        # True suppresses the prompt everywhere -- the first-run modal, the
+        # standing banner, and the block on the setup page. It is an override on
+        # top of the per-browser dismissal, not a replacement for it: false
+        # leaves that behaviour untouched.
+        "registration_prompt_dismissed": registration_prompt_dismissed,
     }
 
 
