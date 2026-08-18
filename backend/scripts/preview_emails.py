@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.services import email_layout as L  # noqa: E402
 from app.services import email_templates as T  # noqa: E402
+from app.services.town_time import format_town  # noqa: E402
 
 TOWN = "Maple Ridge Township"
 BRAND = "#3f5b9c"
@@ -85,8 +86,6 @@ def samples():
         primary_color=BRAND, preheader="SR-2026-0184 - Pothole",
         blocks=[
             L.heading("New request assigned", 2),
-            L.paragraph("Hi Dana Alvarez,"),
-            L.paragraph("A new service request has been submitted to your department."),
             L.fields([("Request ID", "SR-2026-0184"), ("Category", "Pothole"),
                       ("Address", "120 Bridge Street"),
                       ("Description", "Deep pothole in the eastbound lane.")]),
@@ -103,7 +102,8 @@ def samples():
                         L.fields([("Request ID", "SR-2026-0184"), ("Category", "Pothole"),
                                   ("Description", "Deep pothole in the eastbound lane."),
                                   ("Address", "120 Bridge Street"),
-                                  ("Submitted", datetime.now(timezone.utc))]),
+                                  ("Submitted", format_town(datetime.now(timezone.utc),
+                                                            "America/New_York"))]),
                         L.button("Open the staff dashboard", f"{PORTAL}/staff"),
                     ],
                     footer_lines=[f"This address is the routing address for a "
@@ -114,8 +114,6 @@ def samples():
         logo_url=LOGO, primary_color=BRAND,
         blocks=[
             L.heading("Status changed", 2),
-            L.paragraph("Hi Dana Alvarez,"),
-            L.paragraph("status changed on a request in your department."),
             L.fields([("Request", "SR-2026-0184 - Pothole"), ("Status", "in_progress"),
                       ("Address", "120 Bridge Street")]),
             L.button("View request in the staff dashboard", STAFF_LINK),
@@ -128,8 +126,6 @@ def samples():
         preheader="9 open, 3 in progress, 2 overdue",
         blocks=[
             L.heading("Weekly digest", 2),
-            L.paragraph("Hi Dana Alvarez,"),
-            L.paragraph("Here's your weekly summary of open service requests."),
             L.stats([("Open", 9), ("In progress", 3), ("Overdue (7+ days)", 2)]),
             L.heading("Oldest open requests", 3),
             L.table(["ID", "Category", "Status", "Age"], [
@@ -147,15 +143,16 @@ def samples():
         township_name=TOWN, logo_url=LOGO, primary_color=BRAND,
         blocks=[
             L.heading("Critical: system needs attention", 2),
-            L.paragraph("These leading indicators just crossed a threshold. "
-                        "Acting now can prevent an outage."),
+            L.paragraph("Each check below has crossed its alert threshold. "
+                        "The condition observed and the action for it are "
+                        "stated on each one."),
             L.callout("Disk is 94% full. Free space or extend the volume.",
                       "critical", title="CRITICAL - Disk space"),
             L.callout("Geocoding quota is 88% consumed with 9 days left in the "
                       "billing period. Raise the cap or reduce lookups.",
                       "warning", title="WARNING - Geocoding quota"),
-            L.paragraph("See Admin Console > System Health for details and one-click "
-                        "restart and maintenance actions.", muted=True),
+            L.paragraph("Full detail, and the restart and maintenance actions, are in "
+                        "Admin Console under System Health.", muted=True),
         ],
         footer_lines=["Proactive health alert. Sent to administrators only."])))
 
@@ -167,8 +164,9 @@ def samples():
             L.callout("Elm Street no longer appears in the road data, so the rule "
                       "that routed it to the county has stopped blocking.",
                       "critical", title="ERROR - Road data"),
-            L.paragraph("Nothing will look wrong until somebody notices. The road may "
-                        "have been renamed upstream, or dropped from the source."),
+            L.paragraph("Reports on Elm Street are now handled by the town, and the "
+                        "routing screens show no error. The usual cause is a spelling "
+                        "change by the data publisher."),
         ],
         footer_lines=["Road data check. Sent to administrators only."])))
 
@@ -201,11 +199,68 @@ def samples():
         subject="Request #SR-2026-0184 received", township_name="311",
         blocks=[
             L.heading("Your request has been received", 2),
-            L.paragraph("Thank you for submitting a service request to your local township."),
             L.fields([("Request ID", "#SR-2026-0184")]),
             L.paragraph("You can track the status of your request using this ID."),
         ],
         footer_lines=["We appreciate your help in making our community better."])))
+
+    # ---------------------------------------------------------------
+    # Two renders that exist to be *checked*, not to be sent.
+    # ---------------------------------------------------------------
+
+    # Text expansion. German and Finnish run 30-40% longer than English, and
+    # the failure that costs is silent: a button label that overflows the
+    # column, a stat label clipped to "Offene Anfrag", a table header that
+    # pushes the table past 600px. These strings are 40-60% longer than the
+    # English they stand in for, so the previews show whether the layout
+    # holds before a translated deployment finds out.
+    out.append(("expansion-stress-de", "Diagnostic: German-length strings (+40%)",
+                L.build_email(
+                    subject="Wochenbericht: 12 offene Serviceanfragen",
+                    township_name="Gemeindeverwaltung Maple Ridge",
+                    logo_url=LOGO, primary_color=BRAND,
+                    tagline="311-Bürgerserviceportal",
+                    preheader="9 offen, 3 in Bearbeitung, 2 überfällig",
+                    blocks=[
+                        L.heading("Wochenübersicht der offenen Serviceanfragen", 2),
+                        L.lede("Zwei Anfragen sind seit mehr als sieben Tagen "
+                               "unbearbeitet geblieben."),
+                        L.status_panel("Aktueller Bearbeitungsstand",
+                                       "In Bearbeitung durch das Straßenbauamt", "info"),
+                        L.stats([("Offene Anfragen", 9),
+                                 ("In Bearbeitung befindlich", 3),
+                                 ("Überfällig (7+ Tage)", 2),
+                                 ("Diese Woche abgeschlossen", 14)]),
+                        L.fields([
+                            ("Anfragenummer", "SR-2026-0184"),
+                            ("Zuständigkeitsbereich", "Straßenunterhaltung und Winterdienst"),
+                            ("Straßenbezeichnung", "Brückenstraße 120, Gemeinde Maple Ridge"),
+                        ]),
+                        L.table(["Anfragenummer", "Kategorie", "Bearbeitungsstand", "Alter"], [
+                            ["SR-2026-0102", "Straßenbeleuchtung ausgefallen", "offen", "23 T"],
+                            ["SR-2026-0119", "Unerlaubte Abfallentsorgung", "in Bearbeitung", "16 T"],
+                        ]),
+                        L.callout("Die Straßendaten konnten seit vier aufeinanderfolgenden "
+                                  "Versuchen nicht aktualisiert werden.", "warning",
+                                  title="Warnung - Straßendatenaktualisierung"),
+                        L.button("Alle offenen Serviceanfragen im Mitarbeiterbereich anzeigen",
+                                 f"{PORTAL}/staff"),
+                        L.link("Benachrichtigungseinstellungen verwalten",
+                               f"{PORTAL}/staff/settings"),
+                    ],
+                    footer_lines=["Sie erhalten diese Nachricht, weil Sie Mitarbeiterin "
+                                  "oder Mitarbeiter der Gemeindeverwaltung sind."],
+                    no_reply_note="Bitte antworten Sie nicht direkt auf diese E-Mail.")))
+
+    # Right-to-left. The app offers Arabic in its language picker, so this is a
+    # real path: alignment, list indents and the callout keyline all have to
+    # mirror, not just the `dir` attribute.
+    out.append(("resident-confirmation-ar", "Diagnostic: Arabic (right-to-left)",
+                T.build_confirmation_email(
+                    township_name=TOWN, logo_url=LOGO, primary_color=BRAND,
+                    request_id="SR-2026-0186", service_name="حفرة في الطريق",
+                    description="حفرة كبيرة في المسار الشرقي بعد الجسر مباشرة.",
+                    address="١٢٠ شارع الجسر", portal_url=PORTAL, language="ar")))
 
     return out
 

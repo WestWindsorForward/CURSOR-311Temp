@@ -656,8 +656,11 @@ class NotificationService:
             subject=f"Request #{request_id} received",
             township_name="311",
             blocks=[
+                # "Thank you for submitting a service request to your local
+                # township" restated the heading directly above it and has
+                # gone; the line that tells the reader what the number is for
+                # has stayed, because it is the only instruction here.
                 L.heading("Your request has been received", 2),
-                L.paragraph("Thank you for submitting a service request to your local township."),
                 L.fields([("Request ID", f"#{request_id}")]),
                 L.paragraph("You can track the status of your request using this ID."),
             ],

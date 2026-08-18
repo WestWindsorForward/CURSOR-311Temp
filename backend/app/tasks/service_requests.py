@@ -3,6 +3,7 @@ from app.db.session import SessionLocal
 from app.models import ServiceRequest
 from app.services.notifications import notification_service
 from app.services import email_layout as L
+from app.services.town_time import format_town
 from sqlalchemy import select
 import asyncio
 import os
@@ -790,10 +791,12 @@ def send_department_notification(request_id: int, department_email: str = None):
                         logo_url=logo_url,
                         primary_color=primary_color,
                         preheader=f"{request.service_request_id} - {request.service_name}",
+                        # No greeting and no "a new service request has been
+                        # submitted to your department": the heading says that,
+                        # and a line that restates the heading is a line the
+                        # reader has to skip before reaching the address.
                         blocks=[
                             L.heading("New request assigned", 2),
-                            L.paragraph(f"Hi {staff.full_name or staff.username},"),
-                            L.paragraph("A new service request has been submitted to your department."),
                             L.fields([
                                 ("Request ID", request.service_request_id),
                                 ("Category", request.service_name),
@@ -821,12 +824,12 @@ def send_department_notification(request_id: int, department_email: str = None):
                     # Send SMS if enabled globally and by user preference
                     if send_sms and staff.phone:
                         short_desc = (request.description or "")[:50]
-                        sms_message = f"""📋 {township_name} 311
-New Request: {request.service_name}
+                        sms_message = f"""{township_name} 311
+New request: {request.service_name}
 "{short_desc}..."
-📍 {request.address or 'No address'}
+{request.address or 'No address'}
 
-🔗 {staff_link}"""
+{staff_link}"""
                         await notification_service.send_sms(staff.phone, sms_message)
                         notified_staff.append({"phone": staff.phone, "type": "sms"})
             
@@ -846,7 +849,13 @@ New Request: {request.service_name}
                             ("Category", request.service_name),
                             ("Description", request.description or ""),
                             ("Address", request.address or "Not provided"),
-                            ("Submitted", request.requested_datetime),
+                            # The town's wall clock, not the stored UTC. A raw
+                            # `2026-08-18 02:14:00+00:00` in a field list is
+                            # both unreadable and, for a clerk in New Jersey,
+                            # the wrong evening.
+                            ("Submitted", format_town(
+                                request.requested_datetime,
+                                getattr(settings, "timezone", None))),
                         ]),
                         L.button("Open the staff dashboard", f"{portal_url}/staff"),
                     ],
@@ -1012,10 +1021,12 @@ def notify_staff_of_activity(request_id: int, event: str, actor: str = None):
                         logo_url=logo_url,
                         primary_color=primary_color,
                         preheader=f"{label} - {request.service_request_id}",
+                        # The greeting carried nothing, and the sentence under
+                        # it was the heading lower-cased with four words after
+                        # it -- a fragment assembled in English word order that
+                        # said no more than the heading already had.
                         blocks=[
                             L.heading(label, 2),
-                            L.paragraph(f"Hi {staff.full_name or staff.username},"),
-                            L.paragraph(f"{label.lower()} on a request in your department."),
                             L.fields([
                                 ("Request", f"{request.service_request_id} - {request.service_name}"),
                                 ("Status", status_text),
@@ -1037,7 +1048,7 @@ def notify_staff_of_activity(request_id: int, event: str, actor: str = None):
                 if send_sms and staff.phone:
                     await notification_service.send_sms(
                         staff.phone,
-                        f"{township_name} 311 — {label} on {request.service_request_id}: {status_text}\n🔗 {staff_link}"
+                        f"{township_name} 311 — {label} on {request.service_request_id}: {status_text}\n{staff_link}"
                     )
                     notified.append(staff.phone)
 
@@ -1466,8 +1477,6 @@ def send_weekly_digest():
                     preheader=f"{open_count} open, {in_progress} in progress, {overdue} overdue",
                     blocks=[
                         L.heading("Weekly digest", 2),
-                        L.paragraph(f"Hi {staff.full_name or staff.username},"),
-                        L.paragraph("Here's your weekly summary of open service requests."),
                         L.stats([
                             ("Open", open_count),
                             ("In progress", in_progress),
@@ -1658,8 +1667,9 @@ def proactive_health_scan():
             # mode, or with a screen reader, has to get the same answer.
             blocks = [
                 L.heading(f"{worst}: system needs attention", 2),
-                L.paragraph("These leading indicators just crossed a threshold. "
-                            "Acting now can prevent an outage."),
+                L.paragraph("Each check below has crossed its alert threshold. "
+                            "The condition observed and the action for it are "
+                            "stated on each one."),
             ]
             for c in escalations:
                 tone = "critical" if c["status"] == "critical" else "warning"
@@ -1669,8 +1679,8 @@ def proactive_health_scan():
                     title=f"{c['status'].upper()} - {c['label']}",
                 ))
             blocks.append(L.paragraph(
-                "See Admin Console > System Health for details and one-click "
-                "restart and maintenance actions.", muted=True))
+                "Full detail, and the restart and maintenance actions, are in "
+                "Admin Console under System Health.", muted=True))
             subject = f"[{worst}] {township} - {len(escalations)} system check(s) need attention"
             message = L.build_email(
                 subject=subject,

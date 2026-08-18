@@ -77,24 +77,48 @@ def test_no_module_hand_rolls_its_own_email_document():
 
 
 def test_every_email_is_the_same_document():
-    """Same shell, same width, same header. Parity is the point."""
+    """Same shell, same width, same masthead. Parity is the point."""
     for slug, html in _htmls():
         assert html.lstrip().startswith("<!DOCTYPE html>"), slug
         assert f'width="{L.MAX_WIDTH}"' in html, slug
-        assert "311 Service Portal" in html, slug
+        # The masthead names the service under the town name. It used to be the
+        # literal English "311 Service Portal" written into the layout, which
+        # is why a Spanish confirmation carried an English header; it is a
+        # translated string passed in now, so what is asserted is that the
+        # masthead has one, not which language it is in.
+        assert "text-transform:uppercase" in html, slug
+        assert "311" in html, slug
+
+
+def test_the_masthead_tagline_is_translated_and_not_baked_into_the_layout():
+    """A user-visible sentence that bypasses the translation path is a bug even
+    when it is only three words long."""
+    from app.services.email_templates import build_confirmation_email
+
+    es = build_confirmation_email(
+        township_name="T", logo_url=None, primary_color="#3f5b9c", request_id="1",
+        service_name="Bache", description="d", address=None,
+        portal_url="https://t.gov", language="es")
+    assert "Portal de Servicios 311" in es["html"]
+    assert "Portal de Servicios 311" in es["text"]
+    assert "311 Service Portal" not in es["html"]
 
 
 # ---------------------------------------------------------------------------
 # Outlook / Word safety
 # ---------------------------------------------------------------------------
 
-# Word ignores every one of these silently. An email whose structure or
-# legibility depends on one does not degrade in Outlook, it breaks.
+_STYLE = re.compile(r'style="([^"]*)"')
+_COLOR = re.compile(r"(?<![-a-z])color\s*:")
+
+
+# The line is not "modern versus safe". It is whether the Word fallback looks
+# deliberate or looks broken. These collapse rather than simplify: an email
+# whose structure or legibility depends on one does not degrade in Outlook.
 FORBIDDEN = [
-    ("linear-gradient", "Word renders no gradient; the header would lose its background"),
-    ("radial-gradient", "as above"),
-    ("box-shadow", "dropped by Word"),
-    ("rgba(", "dropped by Word, taking the colour with it"),
+    ("radial-gradient", "no solid can stand in for a radial; Word shows nothing"),
+    ("box-shadow", "dropped by Word, and rendered inconsistently elsewhere"),
+    ("rgba(", "Word drops the whole declaration, taking the colour with it"),
     ("display:flex", "no flexbox in Word; columns collapse into a stack"),
     ("display: flex", "no flexbox in Word"),
     ("display:grid", "no grid in Word"),
@@ -108,6 +132,29 @@ FORBIDDEN = [
 def test_no_email_depends_on_css_outlook_drops(slug, html):
     for token, why in FORBIDDEN:
         assert token not in html, f"{slug}: {token!r} -- {why}"
+
+
+@pytest.mark.parametrize("slug,html", _htmls(), ids=_ids())
+def test_every_gradient_sits_on_a_solid_that_can_stand_alone(slug, html):
+    """Gradients are allowed -- Word takes the `background-color` underneath and
+    the surface still looks finished. A gradient *without* that solid is the
+    version that renders as a hole, so the pairing is enforced rather than
+    remembered."""
+    for style in _STYLE.findall(html):
+        if "linear-gradient" in style:
+            assert "background-color" in style, \
+                f"{slug}: gradient with no solid fallback -- {style}"
+            assert "background-image:linear-gradient" in style.replace(" ", ""), \
+                f"{slug}: a gradient must be the image layer, not the shorthand -- {style}"
+
+
+@pytest.mark.parametrize("slug,html", _htmls(), ids=_ids())
+def test_rounded_corners_are_used_and_degrade_to_square(slug, html):
+    """`border-radius` is reclaimed deliberately: Word ignores it and draws
+    square corners, which is a different finished look rather than a broken
+    one. Its absence everywhere was the previous pass being more conservative
+    than the medium requires."""
+    assert "border-radius" in html, slug
 
 
 @pytest.mark.parametrize("slug,html", _htmls(), ids=_ids())
@@ -140,10 +187,6 @@ def test_every_email_declares_a_colour_scheme(slug, html):
     assert "color-scheme: light dark" in html, slug
     assert "@media (prefers-color-scheme: dark)" in html, slug
     assert "[data-ogsc]" in html, slug  # Gmail rewrites the attribute instead
-
-
-_STYLE = re.compile(r'style="([^"]*)"')
-_COLOR = re.compile(r"(?<![-a-z])color\s*:")
 
 
 @pytest.mark.parametrize("slug,html", _htmls(), ids=_ids())
@@ -264,6 +307,51 @@ def test_the_text_part_keeps_the_links(slug, message):
     urls = re.findall(r'href="(https?://[^"]+)"', message["html"])
     for url in set(urls):
         assert url in message["text"], f"{slug}: {url} is missing from the text part"
+
+
+# ---------------------------------------------------------------------------
+# Voice
+#
+# These are letters from a town to its residents and its own staff. The tests
+# below are blunt instruments -- they cannot judge a sentence -- but the two
+# tics that kept reappearing are mechanical enough to catch.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("slug,message", [(s, m) for s, _, m in MESSAGES], ids=_ids())
+def test_no_email_exclaims_at_anybody(slug, message):
+    """A town does not shout at a resident who is reporting a pothole."""
+    assert "!" not in message["text"], slug
+
+
+@pytest.mark.parametrize("slug,message", [(s, m) for s, _, m in MESSAGES], ids=_ids())
+def test_no_email_opens_with_a_greeting_that_carries_nothing(slug, message):
+    """"Hi Dana Alvarez," above a heading that already names the request is a
+    line the reader has to get past to reach the address."""
+    for opener in ("Hi ", "Hello ", "Dear "):
+        assert not message["text"].startswith(opener), slug
+        assert f"\n{opener}" not in message["text"], f"{slug}: greeting line"
+
+
+def test_the_admin_alerts_state_what_was_observed_not_what_might_happen():
+    """Hedged warnings make an administrator anxious without telling them
+    anything to act on. "May stop working" is now the observed condition."""
+    by_slug = dict((slug, m) for slug, _, m in MESSAGES)
+    joined = " ".join(by_slug[s]["text"] for s in by_slug
+                      if s.startswith("admin-"))
+    for hedge in ("may stop", "might stop", "could stop", "possibly"):
+        assert hedge not in joined.lower(), hedge
+
+
+def test_the_system_does_not_call_itself_we_when_writing_to_its_operators():
+    """This is the town's own software emailing the town's own administrators,
+    not a vendor writing to a customer."""
+    by_slug = dict((slug, m) for slug, _, m in MESSAGES)
+    for slug in by_slug:
+        if not slug.startswith("admin-"):
+            continue
+        words = re.findall(r"[A-Za-z']+", by_slug[slug]["text"].lower())
+        for pronoun in ("we", "us", "our"):
+            assert pronoun not in words, f"{slug}: {pronoun!r}"
 
 
 def test_the_text_part_escapes_nothing_and_the_html_part_escapes_everything():
@@ -445,8 +533,16 @@ def test_only_http_urls_survive_into_hrefs_and_srcs():
     assert "data:image" not in html
 
 
+# The two diagnostic renders below exist to be inspected, not sent: one is a
+# different (German) town, the other is Arabic. They belong in the rendering
+# assertions and not in the ones about this town's name.
+DIAGNOSTIC = {"expansion-stress-de"}
+
+
 def test_every_email_carries_the_town_name_and_the_same_footer_treatment():
     for slug, _, message in MESSAGES:
+        if slug in DIAGNOSTIC:
+            continue
         assert message["subject"], slug
         # The town names itself in every message -- in the branded header of
         # the HTML, and in the subject or the body of the text half.
@@ -457,6 +553,20 @@ def test_every_email_carries_the_town_name_and_the_same_footer_treatment():
         assert "311" in message["html"], slug
 
 
+# ---------------------------------------------------------------------------
+# Direction and text expansion
+#
+# The app offers Arabic in its language picker and sets `document.dir` for it
+# (frontend/src/context/TranslationContext.tsx), so an RTL email is a path a
+# resident can actually reach.
+# ---------------------------------------------------------------------------
+
+_RTL_BLOCKS = [L.heading("h", 2), L.paragraph("p"), L.fields([("k", "v")]),
+               L.bullets(["one"]), L.table(["a"], [["b"]]),
+               L.callout("c", "warning"), L.status_panel("s", "v"),
+               L.button("go", "https://t.gov")]
+
+
 def test_rtl_languages_get_a_direction():
     html = L.render_html(township_name="T", logo_url=None, primary_color="#3f5b9c",
                          title="t", blocks=[L.paragraph("hi")], language="ar")
@@ -464,3 +574,64 @@ def test_rtl_languages_get_a_direction():
     ltr = L.render_html(township_name="T", logo_url=None, primary_color="#3f5b9c",
                         title="t", blocks=[L.paragraph("hi")], language="en")
     assert "dir=" not in ltr
+
+
+def test_rtl_mirrors_the_layout_and_not_only_the_attribute():
+    """`dir="rtl"` on `<html>` does not move a `text-align:left`, a
+    `padding-left` on a list, or the accent keyline down a callout's left
+    edge. Each of those is a left-aligned island in a right-aligned message."""
+    rtl = L.render_html(township_name="T", logo_url=None, primary_color="#3f5b9c",
+                        title="t", blocks=_RTL_BLOCKS, language="ar")
+    ltr = L.render_html(township_name="T", logo_url=None, primary_color="#3f5b9c",
+                        title="t", blocks=_RTL_BLOCKS, language="en")
+    assert "text-align:left" not in rtl
+    assert "text-align:right" in rtl
+    assert "text-align:left" in ltr and "text-align:right" not in ltr
+    # The list indent and the callout keyline mirror too.
+    assert "padding-right:22px" in rtl and "padding-left:22px" in ltr
+    assert "border-right:4px solid" in rtl and "border-left:4px solid" in ltr
+    # And the shell carries the direction, because Word does not inherit it
+    # from `<html>` onto a nested table.
+    assert rtl.count('dir="rtl"') >= 3
+
+
+def test_nothing_is_sized_to_the_length_of_its_english():
+    """German, Spanish and Finnish run 30-40% longer. The failure mode is
+    silent -- a clipped stat label, a button wider than the column -- so the
+    properties that prevent it are asserted rather than eyeballed."""
+    html = dict((slug, m) for slug, _, m in MESSAGES)["expansion-stress-de"]["html"]
+    # No fixed pixel widths on anything that holds translated text, and no
+    # nowrap that would push a long label out of its cell. The shell's own
+    # 600px and the 620px media-query breakpoint are the layout, not content.
+    body = html[html.index("<body"):]
+    assert "white-space:nowrap" not in body
+    leftover = (body.replace(f"width:{L.MAX_WIDTH}px", "")
+                    .replace(f"max-width:{L.MAX_WIDTH}px", "")
+                    .replace("max-width:100%", ""))
+    assert not re.search(r"width:\s*\d+px", leftover), \
+        "a fixed width around translated text"
+    # Long compounds break instead of widening the column.
+    assert "word-break:break-word" in html
+    for label in ("In Bearbeitung befindlich", "Alle offenen Serviceanfragen"):
+        assert label in html, "the long sample string was clipped away"
+
+
+def test_a_fourth_stat_wraps_to_a_second_row_rather_than_shrinking():
+    """Four tiles across a 544px column is 118px each, which a translated
+    label cannot survive. Past three they wrap."""
+    html = L.render_html(township_name="T", logo_url=None, primary_color="#3f5b9c",
+                         title="t", blocks=[L.stats([("a", 1), ("b", 2), ("c", 3), ("d", 4)])])
+    assert html.count("<tr>") >= 2
+    assert 'width="33%"' in html and 'width="25%"' not in html
+
+
+def test_the_brand_gradient_never_costs_the_label_its_contrast():
+    """The masthead gradient is derived from the town's own colour, so a pale
+    brand produces pale stops. Each stop still has to clear AA against the one
+    foreground the whole surface uses, and the derivation backs off to flat
+    rather than shipping an unreadable end."""
+    for brand in ("#fde047", "#1e3a8a", "#6366f1", "#e11d48", "#f8fafc", "#111827"):
+        fg = L.on_color(brand)
+        floor = min(4.5, L.contrast(fg, brand))
+        for stop in L.brand_stops(brand):
+            assert L.contrast(fg, stop) >= floor, (brand, stop)
