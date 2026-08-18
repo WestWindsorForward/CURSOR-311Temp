@@ -1,0 +1,312 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "metadata": {
+        "comments": [
+            "Pinpoint 311 - the Azure resources a town needs, as one deployment.",
+            "",
+            "Azure renders this itself: the portal reads the parameters below and draws",
+            "the form, so the preview a town sees before pressing Create comes from",
+            "Microsoft rather than from us. Nothing in this file references anything of",
+            "ours at deploy time - no URLs to fetch, no scripts to run, no callbacks.",
+            "",
+            "It deliberately emits NO KEYS as outputs. Deployment outputs are kept in the",
+            "resource group's deployment history and are readable by anyone who can read",
+            "that history, which is a wider audience than the person who deployed. The",
+            "outputs here are names and endpoints; the setup guide says which portal blade",
+            "each key is copied from. That is one extra click and materially safer.",
+            "",
+            "What it does NOT create, because Azure does not allow it to:",
+            "  * the Entra app registration and client secret Pinpoint signs in with.",
+            "    That is a directory object, outside the scope of resource templates. Use",
+            "    a managed identity instead where the server runs on Azure - then there",
+            "    is no credential at all - or create the app registration by hand.",
+            "  * an AI Face resource. Microsoft gates Face behind a Limited Access review.",
+            "    The multi-service account below serves the Face endpoint once your",
+            "    subscription is approved; until then it answers 403, which is a provider",
+            "    gate and not a fault in this template.",
+            "  * email and SMS. Both need DNS you control or carrier registration that",
+            "    takes weeks. No template shortens either."
+        ]
+    },
+    "parameters": {
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]",
+            "metadata": {
+                "description": "Region for every resource. Also the value for the Translator 'Region' box in Pinpoint."
+            }
+        },
+        "deployKeyVault": {
+            "type": "bool",
+            "defaultValue": true,
+            "metadata": {
+                "description": "Create the key vault and the RSA key that wraps resident personal information."
+            }
+        },
+        "vaultName": {
+            "type": "string",
+            "defaultValue": "[concat('pinpoint311-kv-', uniqueString(resourceGroup().id))]",
+            "minLength": 3,
+            "maxLength": 24,
+            "metadata": {
+                "description": "Key vault name. Must be unique across all of Azure. IF A VAULT OF THIS NAME ALREADY EXISTS IN THIS RESOURCE GROUP IT WILL BE UPDATED IN PLACE, not left alone - use a name you have not used before."
+            }
+        },
+        "keyName": {
+            "type": "string",
+            "defaultValue": "pinpoint-311-pii",
+            "metadata": {
+                "description": "Name of the RSA key. Goes in the 'Key name' box in Pinpoint. An existing key of this name gains a new version rather than being replaced."
+            }
+        },
+        "keySize": {
+            "type": "int",
+            "defaultValue": 4096,
+            "allowedValues": [2048, 3072, 4096],
+            "metadata": {
+                "description": "RSA key size. 2048 and 4096 are both fine for Pinpoint."
+            }
+        },
+        "softDeleteRetentionInDays": {
+            "type": "int",
+            "defaultValue": 90,
+            "minValue": 7,
+            "maxValue": 90,
+            "metadata": {
+                "description": "How long a deleted vault stays recoverable. IRREVERSIBLE SETTING AHEAD: this vault is created with purge protection enabled, which Azure does not allow to be turned off again. That is what stops anyone wiping the vault - and every resident record encrypted under it - inside the recovery window. It is the right choice, and it cannot be undone."
+            }
+        },
+        "pinpointPrincipalObjectId": {
+            "type": "string",
+            "defaultValue": "",
+            "metadata": {
+                "description": "OPTIONAL. The object id of the identity Pinpoint signs in as - a managed identity, or the service principal of an Entra app registration. Given one, this grants it Key Vault Crypto User and Key Vault Secrets Officer ON THIS VAULT ONLY, and nothing anywhere else. Leave blank and grant it by hand afterwards. This is an object id, not an application (client) id."
+            }
+        },
+        "deployAzureOpenAI": {
+            "type": "bool",
+            "defaultValue": false,
+            "metadata": {
+                "description": "Create an Azure OpenAI account and one model deployment, for the AI Assistance card. Model availability differs by region and your subscription must be eligible; neither is something this template can arrange."
+            }
+        },
+        "openAiAccountName": {
+            "type": "string",
+            "defaultValue": "[concat('pinpoint311-openai-', uniqueString(resourceGroup().id))]",
+            "metadata": {
+                "description": "Azure OpenAI account name. Its endpoint goes in the 'Azure OpenAI Endpoint' box in Pinpoint."
+            }
+        },
+        "openAiDeploymentName": {
+            "type": "string",
+            "defaultValue": "pinpoint-311-chat",
+            "metadata": {
+                "description": "Deployment name. This, not the model name, is what goes in the 'Deployment name' box in Pinpoint."
+            }
+        },
+        "openAiModelName": {
+            "type": "string",
+            "defaultValue": "gpt-4o-mini",
+            "metadata": {
+                "description": "Model to deploy. Check what your region currently offers - the list changes, and a model that is not available here fails the deployment loudly rather than quietly."
+            }
+        },
+        "openAiModelVersion": {
+            "type": "string",
+            "defaultValue": "2024-07-18",
+            "metadata": {
+                "description": "Model version. Must be one your region offers for the model above."
+            }
+        },
+        "openAiCapacity": {
+            "type": "int",
+            "defaultValue": 10,
+            "metadata": {
+                "description": "Throughput units, in thousands of tokens per minute. 10 is a small municipal workload."
+            }
+        },
+        "deployCognitiveServices": {
+            "type": "bool",
+            "defaultValue": false,
+            "metadata": {
+                "description": "Create one multi-service AI Services account. A single key and endpoint from it covers Translator (with the region above), image reading for licence plates, and face detection once Microsoft's Limited Access review has approved your subscription."
+            }
+        },
+        "cognitiveAccountName": {
+            "type": "string",
+            "defaultValue": "[concat('pinpoint311-ai-', uniqueString(resourceGroup().id))]",
+            "metadata": {
+                "description": "Multi-service AI Services account name. Its endpoint goes in both the 'Vision endpoint' and 'Face endpoint' boxes in Pinpoint; its key goes in both key boxes."
+            }
+        },
+        "keyVaultCryptoUserRoleId": {
+            "type": "string",
+            "defaultValue": "12338af0-0e69-4776-bea7-57ae8d297424",
+            "metadata": {
+                "description": "Microsoft's built-in Key Vault Crypto User role definition id. Exposed so it can be corrected without editing this file if Microsoft's published id differs; verify it against the role list on the vault's Access control (IAM) before deploying."
+            }
+        },
+        "keyVaultSecretsOfficerRoleId": {
+            "type": "string",
+            "defaultValue": "b86a8fe4-44ce-4948-aee5-eccb2c155cd7",
+            "metadata": {
+                "description": "Microsoft's built-in Key Vault Secrets Officer role definition id. Needed only if Pinpoint also keeps its credentials in this vault. Verify as above."
+            }
+        }
+    },
+    "variables": {
+        "vaultId": "[resourceId('Microsoft.KeyVault/vaults', parameters('vaultName'))]",
+        "grantPinpoint": "[and(parameters('deployKeyVault'), not(empty(parameters('pinpointPrincipalObjectId'))))]"
+    },
+    "resources": [
+        {
+            "comments": "The vault. enableRbacAuthorization picks Azure roles as the permission model, which is Azure's own default and what Pinpoint's setup steps assume. Soft delete is on and cannot be turned off. Purge protection is the irreversible one described in the parameter above.",
+            "condition": "[parameters('deployKeyVault')]",
+            "type": "Microsoft.KeyVault/vaults",
+            "apiVersion": "2023-07-01",
+            "name": "[parameters('vaultName')]",
+            "location": "[parameters('location')]",
+            "properties": {
+                "tenantId": "[subscription().tenantId]",
+                "sku": { "family": "A", "name": "standard" },
+                "enableRbacAuthorization": true,
+                "enableSoftDelete": true,
+                "softDeleteRetentionInDays": "[parameters('softDeleteRetentionInDays')]",
+                "enablePurgeProtection": true,
+                "publicNetworkAccess": "Enabled",
+                "networkAcls": { "defaultAction": "Allow", "bypass": "AzureServices" }
+            }
+        },
+        {
+            "comments": "The RSA key. Created through Azure Resource Manager, which is why this route does not need the deployer to hold Key Vault Crypto Officer first - the requirement that stops the portal's Generate/Import screen working on a brand-new vault. keyOps is limited to wrapping and unwrapping, which is all Pinpoint ever asks of it.",
+            "condition": "[parameters('deployKeyVault')]",
+            "type": "Microsoft.KeyVault/vaults/keys",
+            "apiVersion": "2023-07-01",
+            "name": "[concat(parameters('vaultName'), '/', parameters('keyName'))]",
+            "dependsOn": ["[variables('vaultId')]"],
+            "properties": {
+                "kty": "RSA",
+                "keySize": "[parameters('keySize')]",
+                "keyOps": ["wrapKey", "unwrapKey"],
+                "attributes": { "enabled": true }
+            }
+        },
+        {
+            "comments": "Scoped to the vault, never to the resource group or the subscription. The assignment name is derived from the scope and the principal, so redeploying does not pile up duplicates.",
+            "condition": "[variables('grantPinpoint')]",
+            "type": "Microsoft.Authorization/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "scope": "[concat('Microsoft.KeyVault/vaults/', parameters('vaultName'))]",
+            "name": "[guid(variables('vaultId'), parameters('pinpointPrincipalObjectId'), parameters('keyVaultCryptoUserRoleId'))]",
+            "dependsOn": ["[variables('vaultId')]"],
+            "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', parameters('keyVaultCryptoUserRoleId'))]",
+                "principalId": "[parameters('pinpointPrincipalObjectId')]"
+            }
+        },
+        {
+            "comments": "Only needed if this vault is also Pinpoint's secret store. Keys and secrets are separate permissions on the same vault: the Crypto User role above grants nothing over secrets. Officer rather than User because Pinpoint writes credentials here as well as reading them.",
+            "condition": "[variables('grantPinpoint')]",
+            "type": "Microsoft.Authorization/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "scope": "[concat('Microsoft.KeyVault/vaults/', parameters('vaultName'))]",
+            "name": "[guid(variables('vaultId'), parameters('pinpointPrincipalObjectId'), parameters('keyVaultSecretsOfficerRoleId'))]",
+            "dependsOn": ["[variables('vaultId')]"],
+            "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', parameters('keyVaultSecretsOfficerRoleId'))]",
+                "principalId": "[parameters('pinpointPrincipalObjectId')]"
+            }
+        },
+        {
+            "comments": "Azure OpenAI is its own kind of account and is not part of the multi-service one below. customSubDomainName is what gives it the per-resource endpoint Pinpoint needs.",
+            "condition": "[parameters('deployAzureOpenAI')]",
+            "type": "Microsoft.CognitiveServices/accounts",
+            "apiVersion": "2023-05-01",
+            "name": "[parameters('openAiAccountName')]",
+            "location": "[parameters('location')]",
+            "kind": "OpenAI",
+            "sku": { "name": "S0" },
+            "properties": {
+                "customSubDomainName": "[parameters('openAiAccountName')]",
+                "publicNetworkAccess": "Enabled"
+            }
+        },
+        {
+            "condition": "[parameters('deployAzureOpenAI')]",
+            "type": "Microsoft.CognitiveServices/accounts/deployments",
+            "apiVersion": "2023-05-01",
+            "name": "[concat(parameters('openAiAccountName'), '/', parameters('openAiDeploymentName'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))]"
+            ],
+            "sku": { "name": "Standard", "capacity": "[parameters('openAiCapacity')]" },
+            "properties": {
+                "model": {
+                    "format": "OpenAI",
+                    "name": "[parameters('openAiModelName')]",
+                    "version": "[parameters('openAiModelVersion')]"
+                }
+            }
+        },
+        {
+            "comments": "One multi-service AI Services account, which is why three of Pinpoint's Azure cards can share a single key. Its endpoint serves the image-reading path Pinpoint uses for licence plates and the face-detection path it uses for faces, and the same key authenticates Translator against the global translator endpoint when the Region box is set to this account's region.",
+            "condition": "[parameters('deployCognitiveServices')]",
+            "type": "Microsoft.CognitiveServices/accounts",
+            "apiVersion": "2023-05-01",
+            "name": "[parameters('cognitiveAccountName')]",
+            "location": "[parameters('location')]",
+            "kind": "CognitiveServices",
+            "sku": { "name": "S0" },
+            "properties": {
+                "customSubDomainName": "[parameters('cognitiveAccountName')]",
+                "publicNetworkAccess": "Enabled"
+            }
+        }
+    ],
+    "outputs": {
+        "readMeFirst": {
+            "type": "string",
+            "value": "Endpoints and names only. No key is emitted here on purpose: deployment outputs are kept in this resource group's deployment history and can be read by anyone with access to it. Copy each key from its own resource - the vault needs no key at all, Azure OpenAI has one under Keys and Endpoint, and the AI Services account has one in the same place."
+        },
+        "keyVaultUrl": {
+            "condition": "[parameters('deployKeyVault')]",
+            "type": "string",
+            "value": "[if(parameters('deployKeyVault'), reference(variables('vaultId')).vaultUri, '')]",
+            "metadata": { "description": "Pinpoint box: Key Vault URL" }
+        },
+        "keyName": {
+            "type": "string",
+            "value": "[parameters('keyName')]",
+            "metadata": { "description": "Pinpoint box: Key name" }
+        },
+        "directoryTenantId": {
+            "type": "string",
+            "value": "[subscription().tenantId]",
+            "metadata": { "description": "Pinpoint box: Directory (tenant) ID. Leave the box empty if the server uses a managed identity." }
+        },
+        "azureOpenAiEndpoint": {
+            "condition": "[parameters('deployAzureOpenAI')]",
+            "type": "string",
+            "value": "[if(parameters('deployAzureOpenAI'), reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))).endpoint, '')]",
+            "metadata": { "description": "Pinpoint box: Azure OpenAI Endpoint" }
+        },
+        "azureOpenAiDeploymentName": {
+            "condition": "[parameters('deployAzureOpenAI')]",
+            "type": "string",
+            "value": "[parameters('openAiDeploymentName')]",
+            "metadata": { "description": "Pinpoint box: Deployment name" }
+        },
+        "aiServicesEndpoint": {
+            "condition": "[parameters('deployCognitiveServices')]",
+            "type": "string",
+            "value": "[if(parameters('deployCognitiveServices'), reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('cognitiveAccountName'))).endpoint, '')]",
+            "metadata": { "description": "Pinpoint boxes: Vision endpoint and Face endpoint. The same value goes in both." }
+        },
+        "translatorRegion": {
+            "type": "string",
+            "value": "[parameters('location')]",
+            "metadata": { "description": "Pinpoint box: Region. On the Translation card; leave its Endpoint box empty." }
+        }
+    }
+}

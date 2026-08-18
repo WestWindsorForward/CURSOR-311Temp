@@ -1,0 +1,271 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# Pinpoint 311 - the AWS resources a town needs, as one stack.
+#
+# CloudFormation renders this itself. The town sees AWS's own parameter form and,
+# if they ask for one, AWS's own change set - an authoritative diff of what will
+# be created, produced by Amazon rather than narrated by us. Nothing in this file
+# reaches outside their account at deploy time: no URLs to fetch, no scripts to
+# run, no callbacks, no telemetry.
+#
+# IT EMITS NO SECRETS AS OUTPUTS, and it creates none. There is no IAM access key
+# in here. The identity below is a ROLE, which is the arrangement Pinpoint
+# prefers: attach it to the EC2 instance or ECS task the application runs on and
+# it signs in with a token the platform issues minutes at a time and rotates.
+# Nothing to paste into Pinpoint, nothing to leak, nothing to expire. If the
+# application does not run on AWS compute, this stack is still the right one -
+# create an IAM user by hand afterwards and attach the same managed policy.
+#
+# WHAT IT DOES NOT COVER, and why:
+#   * Bedrock model access. Amazon gates each model behind a per-account
+#     enablement step in the Bedrock console. The policy here allows invoking
+#     models; the enablement is a provider gate and not something a template can
+#     press for you.
+#   * Email and SMS. SES domain verification needs DNS records only the town can
+#     publish, and 10DLC phone registration is carrier paperwork measured in
+#     weeks. No template shortens either.
+#   * Nothing for Translate or Rekognition beyond permissions - both are API-only
+#     services with no resource to create.
+#
+# IF A NAME IS TAKEN, this stack FAILS rather than adopting anything: the KMS
+# alias, the role and the instance profile are all named resources, and
+# CloudFormation refuses to create one that already exists. Nothing existing is
+# modified.
+#
+# TO REMOVE IT: delete the stack. The role, policy, instance profile and alias go
+# with it. The KMS key is deliberately retained - see PreventAccidentalKeyDeletion.
+
+Description: >-
+  Pinpoint 311 municipal 311 platform: the KMS key that wraps resident personal
+  information, and one least-privilege IAM role covering that key, Secrets
+  Manager, Translate, Rekognition and Bedrock.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Encryption key }
+        Parameters: [KeyAlias, PreventAccidentalKeyDeletion]
+      - Label: { default: The identity Pinpoint signs in as }
+        Parameters: [RoleName, AllowBedrock, AllowRekognition, AllowTranslate, AllowSecretsManager]
+
+Parameters:
+  KeyAlias:
+    Type: String
+    Default: alias/pinpoint-311-pii
+    AllowedPattern: '^alias/[a-zA-Z0-9/_-]+$'
+    Description: >-
+      Alias for the encryption key. The stack fails if this alias already exists,
+      which is deliberate - it is what stops a second run quietly creating a
+      second key you keep paying for.
+
+  PreventAccidentalKeyDeletion:
+    Type: String
+    Default: 'Yes'
+    AllowedValues: ['Yes', 'No']
+    Description: >-
+      Adds a policy statement denying everyone the ability to schedule this key
+      for deletion or disable it. READ THIS BEFORE CHOOSING: a KMS key stops
+      working the moment deletion is SCHEDULED, not when the waiting period ends,
+      so an accidental deletion breaks every resident record immediately rather
+      than in thirty days. An explicit deny beats every allow, including the
+      account root. To retire the key deliberately later, an administrator
+      removes that statement first - one considered step where there was none.
+      Choosing Yes is the recommendation.
+
+  RoleName:
+    Type: String
+    Default: pinpoint-311-server
+    Description: >-
+      Name of the IAM role Pinpoint signs in as. Attach it to the EC2 instance or
+      ECS task running the application and Pinpoint needs no pasted credential at
+      all. The stack fails if a role of this name already exists.
+
+  AllowTranslate:
+    Type: String
+    Default: 'Yes'
+    AllowedValues: ['Yes', 'No']
+    Description: Permit Amazon Translate, for translating resident reports.
+
+  AllowRekognition:
+    Type: String
+    Default: 'Yes'
+    AllowedValues: ['Yes', 'No']
+    Description: >-
+      Permit Amazon Rekognition face and text detection, for blurring faces and
+      licence plates in resident photographs. Plates are found by reading text,
+      so both actions are granted together or neither is.
+
+  AllowBedrock:
+    Type: String
+    Default: 'No'
+    AllowedValues: ['Yes', 'No']
+    Description: >-
+      Permit invoking Amazon Bedrock models. Each model still has to be enabled
+      for your account in the Bedrock console; this only grants the call.
+
+  AllowSecretsManager:
+    Type: String
+    Default: 'Yes'
+    AllowedValues: ['Yes', 'No']
+    Description: >-
+      Permit Pinpoint to keep every credential a town enters in AWS Secrets
+      Manager rather than in its own database. Pinpoint names each secret after
+      the credential it holds and creates them on first save, so this cannot be
+      scoped to secrets that already exist.
+
+Conditions:
+  DenyKeyDeletion: !Equals [!Ref PreventAccidentalKeyDeletion, 'Yes']
+  UseTranslate: !Equals [!Ref AllowTranslate, 'Yes']
+  UseRekognition: !Equals [!Ref AllowRekognition, 'Yes']
+  UseBedrock: !Equals [!Ref AllowBedrock, 'Yes']
+  UseSecretsManager: !Equals [!Ref AllowSecretsManager, 'Yes']
+
+Resources:
+
+  # Retained on stack deletion on purpose. A KMS key cannot be deleted outright -
+  # only scheduled, with a waiting period - and deleting a stack should never be
+  # the thing that starts a countdown on every resident record in the database.
+  PiiKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Pinpoint 311 - wraps the key that encrypts resident personal information
+      KeyUsage: ENCRYPT_DECRYPT
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Required. A KMS key whose policy locks out the account that owns it
+          # cannot be repaired afterwards by anybody, including AWS support.
+          - Sid: AccountKeepsAdministrativeControl
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          # Four actions, on this key. Not kms:*, and not on any other key.
+          - Sid: Pinpoint311MayUseTheKey
+            Effect: Allow
+            Principal: { AWS: !GetAtt PinpointRole.Arn }
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: '*'
+          - !If
+            - DenyKeyDeletion
+            - Sid: NobodyMayStartDeletingThisKey
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - kms:ScheduleKeyDeletion
+                - kms:DisableKey
+              Resource: '*'
+            - !Ref AWS::NoValue
+
+  PiiKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Ref KeyAlias
+      TargetKeyId: !Ref PiiKey
+
+  # An assumable role rather than a user with access keys. On EC2 the instance
+  # profile below attaches it; on ECS name this role as the task role.
+  PinpointRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: The identity the Pinpoint 311 application signs in to AWS as
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  PinpointInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref RoleName
+      Roles: [!Ref PinpointRole]
+
+  # Everything the application is allowed to do, in one readable document.
+  # Nothing here is account-wide except the two API-only services, which have no
+  # resources to scope to - Translate and Rekognition are called, not owned.
+  PinpointPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: pinpoint-311-application
+      Roles: [!Ref PinpointRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - !If
+            - UseSecretsManager
+            - Sid: KeepTownCredentialsInSecretsManager
+              Effect: Allow
+              Action:
+                - secretsmanager:CreateSecret
+                - secretsmanager:PutSecretValue
+                - secretsmanager:GetSecretValue
+                - secretsmanager:DescribeSecret
+                - secretsmanager:ListSecrets
+              Resource: '*'
+            - !Ref AWS::NoValue
+          - !If
+            - UseTranslate
+            - Sid: TranslateResidentReports
+              Effect: Allow
+              Action: [translate:TranslateText]
+              Resource: '*'
+            - !Ref AWS::NoValue
+          - !If
+            - UseRekognition
+            # DetectText as well as DetectFaces: plate detection works by reading
+            # text in the image, so omitting it disables plates silently while
+            # faces keep working.
+            - Sid: BlurFacesAndPlates
+              Effect: Allow
+              Action: [rekognition:DetectFaces, rekognition:DetectText]
+              Resource: '*'
+            - !Ref AWS::NoValue
+          - !If
+            - UseBedrock
+            - Sid: InvokeBedrockModels
+              Effect: Allow
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+              Resource: '*'
+            - !Ref AWS::NoValue
+
+Outputs:
+  ReadMeFirst:
+    Description: What to do with the values below
+    Value: >-
+      No secret is emitted here, and none was created. Attach the instance
+      profile to the server running Pinpoint and it signs in with no credential
+      to paste. Then enter only the region and the key id in Pinpoint.
+
+  PinpointBoxAwsRegion:
+    Description: 'Pinpoint box: AWS Region'
+    Value: !Ref AWS::Region
+
+  PinpointBoxKeyIdOrArn:
+    Description: 'Pinpoint box: Key ID or ARN'
+    Value: !Ref PiiKey
+
+  KeyArn:
+    Description: Full ARN of the encryption key, for your own records
+    Value: !GetAtt PiiKey.Arn
+
+  RoleArnToAttach:
+    Description: Attach this role to the EC2 instance or ECS task running Pinpoint
+    Value: !GetAtt PinpointRole.Arn
+
+  InstanceProfileName:
+    Description: Instance profile to attach on EC2
+    Value: !Ref PinpointInstanceProfile
