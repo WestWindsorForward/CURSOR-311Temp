@@ -74,6 +74,7 @@ import {
     Download,
     Eye,
     EyeOff,
+    MessageSquareHeart,
     CircleCheck,
     Pencil,
 } from 'lucide-react';
@@ -837,7 +838,11 @@ export default function AdminConsole() {
      * another. They live in `capability_switches` now, with the ticks in Setup
      * Instructions; what is left here has no provider, no credentials and
      * nothing to switch off at the dispatch layer. */
-    const [modules, setModules] = useState({ research_portal: false, unlisted_reports: false });
+    const [modules, setModules] = useState({ research_portal: false, unlisted_reports: false, platform_feedback: false });
+    // Where longer platform feedback is emailed. Held as a string because the
+    // input is a text box and '' is a meaningful answer: it is how an admin
+    // says "make no such offer", and the server stores '' as NULL.
+    const [platformFeedbackEmail, setPlatformFeedbackEmail] = useState<string>('');
     // Town-wide public archival policy, as typed. Held as a string because the
     // input is a text field and "" is a meaningful value: it is how an admin
     // clears the policy, and the server reads "" and 0 as "keep everything".
@@ -1035,7 +1040,9 @@ export default function AdminConsole() {
             setModules({
                 research_portal: settings.modules?.research_portal || false,
                 unlisted_reports: settings.modules?.unlisted_reports ?? (settings.modules as any)?.private_reports ?? false,
+                platform_feedback: settings.modules?.platform_feedback || false,
             });
+            setPlatformFeedbackEmail(settings.platform_feedback_email || '');
             setPublicArchiveDays(settings.public_archive_days ? String(settings.public_archive_days) : '');
         }
     }, [settings]);
@@ -1495,6 +1502,9 @@ export default function AdminConsole() {
             // a fetch that has yet to resolve. The server normalises '' and 0
             // to "no policy".
             payload.public_archive_days = publicArchiveDays === '' ? null : Number(publicArchiveDays);
+            // Also always sent: clearing the box is how a town withdraws the
+            // "tell us more" offer, and the server turns '' into NULL.
+            payload.platform_feedback_email = platformFeedbackEmail.trim() || null;
             await api.updateSettings(payload);
             await refreshSettings();
             setSaveMessage('Modules saved successfully');
@@ -2485,6 +2495,13 @@ export default function AdminConsole() {
                                                Integrations now. */
                                             { key: 'research_portal' as const, label: 'Research Portal', desc: 'Enable researcher access to anonymized data exports', icon: FlaskConical, color: 'violet' },
                                             { key: 'unlisted_reports' as const, label: 'Unlisted Reports', desc: 'Let residents keep a report off the public map and feed. The tracking link still works and staff always see it', icon: EyeOff, color: 'slate' },
+                                            /* The description is deliberately explicit about what lands
+                                               in the town's database, because that is the records
+                                               question a clerk has to be able to answer: one
+                                               multiple-choice answer and a timestamp, no free text, no
+                                               identity. Longer feedback goes to email instead, so it
+                                               never becomes a record this town holds. */
+                                            { key: 'platform_feedback' as const, label: 'Platform Feedback', desc: 'Ask residents one anonymous multiple-choice question about whether this platform made reporting easier. Stores only the answer and the date \u2014 no comments, no name, no email, no IP \u2014 so there is nothing resident-written in your records. Longer feedback goes by email to the address below. Aggregates appear on Statistics', icon: MessageSquareHeart, color: 'sky' },
                                         ].map((mod, idx) => {
                                             const Icon = mod.icon;
                                             const isOn = modules[mod.key];
@@ -2529,6 +2546,39 @@ export default function AdminConsole() {
                                                             />
                                                         </button>
                                                     </div>
+
+                                                    {/* The address longer feedback is emailed to, under the
+                                                        toggle it belongs to. A mailbox rather than a text box
+                                                        on purpose: a comment field would put resident-written
+                                                        text into this database, where it is potentially
+                                                        subject to a public-records request, can contain the
+                                                        resident's own PII, and would have to be scrubbed from
+                                                        exports and moderated. Email keeps all of that out.
+
+                                                        Left blank, the "tell us more" line is not rendered at
+                                                        all -- there is no default address in the code, because
+                                                        a wrong one is worse than no offer. */}
+                                                    {mod.key === 'platform_feedback' && isOn && (
+                                                        <div className="mt-4 border-l-2 border-sky-500/20 pl-4 ml-1">
+                                                            <label className="block text-[11px] font-semibold text-white/40 uppercase tracking-wider mb-2" htmlFor="platform-feedback-email">
+                                                                Email for longer feedback
+                                                            </label>
+                                                            <input
+                                                                id="platform-feedback-email"
+                                                                type="email"
+                                                                value={platformFeedbackEmail}
+                                                                onChange={(e) => setPlatformFeedbackEmail(e.target.value)}
+                                                                placeholder="e.g. team@example.org"
+                                                                className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/50 placeholder:text-white/40"
+                                                                aria-describedby="platform-feedback-email-help"
+                                                            />
+                                                            <p id="platform-feedback-email-help" className="text-white/50 text-xs mt-2">
+                                                                {platformFeedbackEmail.trim()
+                                                                    ? `Residents who answer are offered a "want to tell us more?" link that opens their mail app addressed to ${platformFeedbackEmail.trim()}. Those messages go to that mailbox, never into this database.`
+                                                                    : 'Leave empty and no "tell us more" link is shown. Residents can still answer the one question.'}
+                                                            </p>
+                                                        </div>
+                                                    )}
 
                                                     {/* Per-pack export switches, under the Research Portal
                                                         toggle they govern. Field lists come from the server's

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Float, Text, Boolean, Table, UniqueConstraint, event, select
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Float, Text, Boolean, Table, UniqueConstraint, CheckConstraint, Index, event, select
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.sql import func
@@ -514,7 +514,20 @@ class SystemSettings(Base):
     #
     # `ai_analysis`, `sms_alerts` and `email_notifications` used to be here as
     # well, duplicating a decision the setup page also owned.
-    modules = Column(JSON, default={"unlisted_reports": False, "research_portal": False})
+    modules = Column(JSON, default={
+        "unlisted_reports": False,
+        "research_portal": False,
+        "platform_feedback": False,
+    })
+    # Where a resident is sent if they want to say more than the one-tap
+    # platform-feedback question allows: a plain `mailto:` target, rendered as a
+    # link and nothing else. See PlatformFeedback below for why longer feedback
+    # deliberately never reaches this database.
+    #
+    # NULL or blank means the offer is not rendered at all. A dead or wrong
+    # address is worse than no offer, so there is no default baked in here or
+    # anywhere else in the code -- every deployment types its own.
+    platform_feedback_email = Column(String(255))
     # Which integrations the town wants, independent of whether they are set up.
     #
     # The third fact about a capability, and the one that had nowhere to live:
@@ -625,6 +638,87 @@ class SystemSettings(Base):
     health_alert_state = Column(JSON, default={})
 
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+#: The one question the platform-feedback module asks, and its only permitted
+#: answers, ordered best-to-worst. Ordinal, not numeric: "somewhat easier" is
+#: better than "no difference", but the gap between them is not a unit and
+#: nothing in this codebase averages them into one.
+#:
+#: Wording lives in the frontend (components/PlatformFeedback.tsx); these are
+#: the stored tokens, and they are stable identifiers -- rewording the question
+#: must not orphan the answers already collected.
+PLATFORM_FEEDBACK_ANSWERS = (
+    "much_easier",
+    "somewhat_easier",
+    "no_difference",
+    "somewhat_harder",
+    "much_harder",
+)
+
+
+class PlatformFeedback(Base):
+    """One anonymous answer to one multiple-choice question about Pinpoint.
+
+    WHAT IS STORED, AND WHY IT IS ONLY THIS
+    ---------------------------------------
+    Two columns: which of five ordered options was tapped, and when. That is
+    the whole record. There is deliberately no user id, no session id, no
+    cookie, no IP address (not even a hashed one), no user agent, no report id
+    and no free text -- so a row cannot be attributed to a person by anyone
+    holding the database, and the module needs no retention rule of its own
+    because there is nothing in it to retain.
+
+    NO FREE TEXT, ON PURPOSE
+    ------------------------
+    This is a municipal system. Anything a resident types is stored in the
+    town's own database and is therefore potentially responsive to a
+    public-records request, and it can contain the resident's own name, address
+    or phone number without anybody intending it to. That creates a scrubbing
+    obligation, a moderation obligation and a disclosure risk out of all
+    proportion to the value of the sentence.
+
+    So the resident who wants to say more is offered a `mailto:` link to the
+    address in `SystemSettings.platform_feedback_email` instead. The mail goes
+    to a mailbox, not to this table: there is nothing resident-typed to appear
+    in a records request, nothing to exclude from an export, and nothing to
+    moderate. This follows the precedent set by RESEARCH_PACKS_DEF in
+    api/research.py, where a deselected pack must never *generate* the data at
+    all, precisely so it cannot be asked for later.
+
+    WHERE THIS MAY NOT GO
+    ---------------------
+    Feedback about the platform is not part of a service request, so it is
+    structurally absent from the research export, the Open311 API, the
+    work-order/govtech payloads and every public map or tracker surface -- none
+    of which read this table. That absence is pinned by tests rather than left
+    to luck: see tests/test_platform_feedback.py and the NEVER set in
+    tests/test_work_order_payload.py. Aggregate sentiment about a vendor is not
+    something to ship to a vendor, and it is not research data a town agreed to
+    release.
+
+    Staff see aggregates. There are no individual records to show them.
+    """
+
+    __tablename__ = "platform_feedback"
+    __table_args__ = (
+        # The constraint, not just the enum in Python. A bad value has to be
+        # impossible in the column, or "constrained categorical" is a claim
+        # about the API layer rather than about the data.
+        CheckConstraint(
+            "platform_experience IN ('" + "', '".join(PLATFORM_FEEDBACK_ANSWERS) + "')",
+            name="ck_platform_feedback_answer",
+        ),
+        Index("ix_platform_feedback_submitted_at", "submitted_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Which of PLATFORM_FEEDBACK_ANSWERS was chosen.
+    platform_experience = Column(String(20), nullable=False)
+    # When. Nothing finer-grained is ever shown: staff see counts by month, so
+    # a timestamp cannot be used to line a row up against a report filed in the
+    # same second.
+    submitted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class DisclaimerAcknowledgment(Base):

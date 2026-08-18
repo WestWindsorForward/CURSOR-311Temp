@@ -15,7 +15,7 @@ const defaultSettings: SystemSettings = {
     favicon_url: null,
     hero_text: 'How can we help?',
     primary_color: '#6366f1',
-    modules: { research_portal: false, unlisted_reports: false },
+    modules: { research_portal: false, unlisted_reports: false, platform_feedback: false },
     updated_at: null,
 };
 

@@ -16,11 +16,13 @@
 # Blank or missing means "the revision immediately before head", which is the
 # expand case. Get it wrong in the safe direction: naming a NEWER revision only
 # blocks a rollout, while naming an older one lets a broken build reach towns.
-# Head is f6b4d8e2a3c5 (registration_prompt_dismissed), a purely additive column
-# with a server default, so the rule above puts this at the revision immediately
-# before it -- e5a3c7b9d1f4 (host_provided_keys), itself additive. It had once
-# been left at c3d4e5f6a7b8 for fourteen revisions, several of them contract
-# migrations (retire_hard_delete, drop_dead_documents_pushed_flag, the NOT NULL
-# on retention state) that this build genuinely cannot start against -- so the
-# declared floor was claiming compatibility the image does not have.
-e5a3c7b9d1f4
+# Head is a8c6e2f4b9d1 (platform_feedback_module) -- a new table plus a nullable
+# column, purely additive with nothing existing touched, so the rule above puts
+# this at the revision immediately before it: f6b4d8e2a3c5
+# (registration_prompt_dismissed), itself additive.
+#
+# It had once been left at c3d4e5f6a7b8 for fourteen revisions, several of them
+# contract migrations (retire_hard_delete, drop_dead_documents_pushed_flag, the
+# NOT NULL on retention state) that this build genuinely cannot start against --
+# so the declared floor was claiming compatibility the image does not have.
+f6b4d8e2a3c5

@@ -54,8 +54,9 @@ import { Button, Card, Modal, Input, Textarea, Select, StatusBadge, Badge } from
 import { useAuth } from '../context/AuthContext';
 import { useSettings } from '../context/SettingsContext';
 import { api, MapLayer, IntegrationRequestLink } from '../services/api';
-import { ServiceRequest, ServiceRequestDetail, ServiceDefinition, Statistics, AdvancedStatistics, RequestComment, ClosedSubstatus, User as UserType, Department, AuditLogEntry, HeatmapData } from '../types';
+import { ServiceRequest, ServiceRequestDetail, ServiceDefinition, Statistics, AdvancedStatistics, RequestComment, ClosedSubstatus, User as UserType, Department, AuditLogEntry, HeatmapData, PlatformFeedbackStatistics } from '../types';
 import { XAxis, YAxis, ResponsiveContainer, AreaChart, Area, Tooltip } from 'recharts';
+import PlatformFeedbackStats from '../components/PlatformFeedbackStats';
 import StaffDashboardMap from '../components/StaffDashboardMap';
 import RequestDetailMap from '../components/RequestDetailMap';
 import SpatialBiasHeatmap from '../components/SpatialBiasHeatmap';
@@ -131,6 +132,10 @@ export default function StaffDashboard() {
     // nobody worked them and they appear in no queue or feed -- but the count is
     // how a town learns one road is turning away twenty people a month.
     const [redirects, setRedirects] = useState<Awaited<ReturnType<typeof api.getRedirectedStatistics>> | null>(null);
+    // Aggregate answers to the optional platform-feedback question. Null when
+    // the module is off, in which case the endpoint 404s and the panel below
+    // renders nothing -- off is off, not hidden.
+    const [platformFeedback, setPlatformFeedback] = useState<PlatformFeedbackStatistics | null>(null);
     const [heatmapData, setHeatmapData] = useState<HeatmapData | null>(null);
 
     // Dashboard-specific state
@@ -441,6 +446,32 @@ export default function StaffDashboard() {
             loadStatistics();
         }
     }, [currentView]);
+
+    // Platform feedback loads on its own rather than inside loadStatistics(),
+    // for two reasons. It is gated on a module flag that arrives with
+    // `settings`, which can land after the statistics fetch has already run --
+    // so it needs the flag in its dependency list. And a town that never
+    // enabled the module must not request it at all: the endpoint 404s by
+    // design, and folding that into loadStatistics() would put "Platform
+    // feedback: Not found" in the error banner of every town that left the
+    // module off.
+    useEffect(() => {
+        if (currentView !== 'statistics') return;
+        if (!settings?.modules?.platform_feedback) return;
+        if (platformFeedback) return;
+        let cancelled = false;
+        api.getPlatformFeedbackStatistics()
+            .then((data) => { if (!cancelled) setPlatformFeedback(data); })
+            .catch((err) => {
+                if (!cancelled) {
+                    setStatsErrors((prev) => [
+                        ...prev,
+                        `Platform feedback: ${err instanceof Error ? err.message : 'request failed'}`,
+                    ]);
+                }
+            });
+        return () => { cancelled = true; };
+    }, [currentView, settings?.modules?.platform_feedback]);
 
     // Refresh the open request, not just the list.
     //
@@ -1434,6 +1465,15 @@ export default function StaffDashboard() {
                                     </p>
                                 </div>
                             )}
+
+                            {/* Platform feedback, when the town runs that module.
+                                Aggregates only -- the table holds a categorical
+                                answer and a timestamp per response and nothing
+                                else, so there is no individual record to open. */}
+                            <PlatformFeedbackStats
+                                enabled={settings?.modules?.platform_feedback}
+                                stats={platformFeedback}
+                            />
 
                             {slaPerf && slaPerf.categories.length > 0 && (
                                 <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl p-4 sm:p-6">

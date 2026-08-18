@@ -63,6 +63,11 @@ PUBLIC_WRITES = {
     ("system.py", "post", "/disclaimer/acknowledge"),                # records a click
     ("system.py", "post", "/translate/batch"),                       # renders the page
     ("roads.py", "post", "/road-check"),                             # is this street closed
+    # One anonymous multiple-choice answer about the platform itself. Requiring
+    # a login to say the site is hard to use would exclude the people whose
+    # answer matters most. The handler refuses outright unless the town enabled
+    # the module, stores nothing about the caller, and is capped per day.
+    ("feedback.py", "post", "/platform"),                            # rate the platform
     # First-run and machine paths. Each checks a secret inside the handler,
     # which is why no Depends appears in the signature.
     ("auth.py", "post", "/bootstrap"),                               # bootstrap password

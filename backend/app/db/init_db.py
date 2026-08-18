@@ -201,6 +201,12 @@ async def _run_schema_migrations():
         # False everywhere until somebody switches it on, so the per-browser
         # dismissal keeps deciding exactly as it did.
         "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS registration_prompt_dismissed BOOLEAN NOT NULL DEFAULT false",
+        # Where longer platform feedback is emailed, when the optional
+        # platform_feedback module is on (added 2026-08-18). NULL means no
+        # address is configured, which renders no "tell us more" link at all
+        # -- so an install that has not migrated behaves as one that never
+        # made the offer, rather than pointing residents somewhere wrong.
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS platform_feedback_email VARCHAR(255)",
         # GovTech integrations: comment/document sync tracking (added 2026-07-01)
         "ALTER TABLE request_comments ADD COLUMN IF NOT EXISTS external_ref VARCHAR(200)",
         "CREATE INDEX IF NOT EXISTS ix_request_comments_external_ref ON request_comments (external_ref)",
@@ -327,7 +333,14 @@ async def seed_database():
             # a card is switched in `capability_switches`, which starts empty --
             # a fresh install has answered nothing, and an empty map reads as
             # "not answered" rather than as "off".
-            modules={"unlisted_reports": False, "research_portal": False},
+            modules={
+                "unlisted_reports": False,
+                "research_portal": False,
+                # Optional platform-feedback question. Off, like the others:
+                # collecting anything from residents is a thing a town opts
+                # into, never a thing a fresh install starts doing.
+                "platform_feedback": False,
+            },
             capability_switches={},
         )
         db.add(settings_obj)
