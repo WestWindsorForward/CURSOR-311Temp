@@ -123,10 +123,10 @@ def samples():
     out.append(("staff-weekly-digest", "Staff: weekly digest", L.build_email(
         subject=f"Weekly digest: 12 open requests - {TOWN} 311", township_name=TOWN,
         logo_url=LOGO, primary_color=BRAND,
-        preheader="9 open, 3 in progress, 2 overdue",
+        preheader="9 open, 3 in progress, 2 open over 7 days",
         blocks=[
             L.heading("Weekly digest", 2),
-            L.stats([("Open", 9), ("In progress", 3), ("Overdue (7+ days)", 2)]),
+            L.stats([("Open", 9), ("In progress", 3), ("Open 7+ days", 2)]),
             L.heading("Oldest open requests", 3),
             L.table(["ID", "Category", "Status", "Age"], [
                 ["SR-2026-0102", "Streetlight out", "open", "23d"],
@@ -223,13 +223,13 @@ def samples():
                     preheader="9 offen, 3 in Bearbeitung, 2 überfällig",
                     blocks=[
                         L.heading("Wochenübersicht der offenen Serviceanfragen", 2),
-                        L.lede("Zwei Anfragen sind seit mehr als sieben Tagen "
-                               "unbearbeitet geblieben."),
+                        L.lede("Zwei Serviceanfragen sind seit mehr als sieben "
+                               "Tagen offen."),
                         L.status_panel("Aktueller Bearbeitungsstand",
                                        "In Bearbeitung durch das Straßenbauamt", "info"),
                         L.stats([("Offene Anfragen", 9),
                                  ("In Bearbeitung befindlich", 3),
-                                 ("Überfällig (7+ Tage)", 2),
+                                 ("Offen seit 7+ Tagen", 2),
                                  ("Diese Woche abgeschlossen", 14)]),
                         L.fields([
                             ("Anfragenummer", "SR-2026-0184"),

@@ -332,6 +332,30 @@ def test_no_email_opens_with_a_greeting_that_carries_nothing(slug, message):
         assert f"\n{opener}" not in message["text"], f"{slug}: greeting line"
 
 
+# Words that assert a deadline was missed. The system knows exactly one
+# deadline -- the opt-in per-category `sla_hours` in `services/sla.py`, which a
+# town sets itself -- and none of these emails consult it. Everything else it
+# has is an age, and an age is not a lateness. The digest used to label
+# requests open more than seven days "Overdue (7+ days)" against a threshold
+# written inline in a SQL CASE and configured by nobody, which accused the town
+# of a failure against a standard it never agreed to. If a genuinely
+# town-configured target is ever surfaced in an email, naming it as exceeded is
+# factual and this list should gain an exemption rather than the email a
+# euphemism.
+DEADLINE_WORDS = ("overdue", "past due", "late", "delayed", "missed",
+                  "behind schedule", "should have been", "breach")
+
+
+@pytest.mark.parametrize("slug,message", [(s, m) for s, _, m in MESSAGES], ids=_ids())
+def test_no_email_claims_a_deadline_the_system_does_not_know(slug, message):
+    body = message["text"].lower() + " " + message["subject"].lower()
+    for word in DEADLINE_WORDS:
+        # Whole words: "escalates" contains "late", and the escalation carve-out
+        # in the connector digest is exactly the sentence that must survive.
+        assert not re.search(rf"\b{re.escape(word)}\b", body), \
+            f"{slug}: {word!r} asserts a deadline nothing configured"
+
+
 def test_the_admin_alerts_state_what_was_observed_not_what_might_happen():
     """Hedged warnings make an administrator anxious without telling them
     anything to act on. "May stop working" is now the observed condition."""

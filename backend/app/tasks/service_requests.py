@@ -1399,10 +1399,17 @@ def send_weekly_digest():
                         func.count(ServiceRequest.id).label('total'),
                         func.sum(case((ServiceRequest.status == 'open', 1), else_=0)).label('open_count'),
                         func.sum(case((ServiceRequest.status == 'in_progress', 1), else_=0)).label('in_progress'),
+                        # Deliberately not called "overdue". Seven days is a
+                        # threshold written here and nowhere else -- no town
+                        # configured it, and it has no relation to the opt-in
+                        # per-category `sla_hours` that is the only deadline
+                        # this system actually knows about. Counting requests
+                        # by age is a fact; calling them late is a judgement
+                        # made on the town's behalf that nobody agreed to.
                         func.sum(case((and_(
                             ServiceRequest.status.in_(['open', 'in_progress']),
                             ServiceRequest.requested_datetime < datetime.now(timezone.utc) - timedelta(days=7)
-                        ), 1), else_=0)).label('overdue')
+                        ), 1), else_=0)).label('open_over_7_days')
                     ).where(
                         and_(
                             ServiceRequest.deleted_at.is_(None),
@@ -1414,10 +1421,17 @@ def send_weekly_digest():
                         func.count(ServiceRequest.id).label('total'),
                         func.sum(case((ServiceRequest.status == 'open', 1), else_=0)).label('open_count'),
                         func.sum(case((ServiceRequest.status == 'in_progress', 1), else_=0)).label('in_progress'),
+                        # Deliberately not called "overdue". Seven days is a
+                        # threshold written here and nowhere else -- no town
+                        # configured it, and it has no relation to the opt-in
+                        # per-category `sla_hours` that is the only deadline
+                        # this system actually knows about. Counting requests
+                        # by age is a fact; calling them late is a judgement
+                        # made on the town's behalf that nobody agreed to.
                         func.sum(case((and_(
                             ServiceRequest.status.in_(['open', 'in_progress']),
                             ServiceRequest.requested_datetime < datetime.now(timezone.utc) - timedelta(days=7)
-                        ), 1), else_=0)).label('overdue')
+                        ), 1), else_=0)).label('open_over_7_days')
                     ).where(
                         and_(
                             ServiceRequest.deleted_at.is_(None),
@@ -1432,7 +1446,7 @@ def send_weekly_digest():
                 total = stats.total or 0
                 open_count = int(stats.open_count or 0)
                 in_progress = int(stats.in_progress or 0)
-                overdue = int(stats.overdue or 0)
+                open_over_7_days = int(stats.open_over_7_days or 0)
                 
                 # Skip if no open requests
                 if total == 0:
@@ -1474,13 +1488,14 @@ def send_weekly_digest():
                     township_name=township_name,
                     logo_url=logo_url,
                     primary_color=primary_color,
-                    preheader=f"{open_count} open, {in_progress} in progress, {overdue} overdue",
+                    preheader=(f"{open_count} open, {in_progress} in progress, "
+                               f"{open_over_7_days} open over 7 days"),
                     blocks=[
                         L.heading("Weekly digest", 2),
                         L.stats([
                             ("Open", open_count),
                             ("In progress", in_progress),
-                            ("Overdue (7+ days)", overdue),
+                            ("Open 7+ days", open_over_7_days),
                         ]),
                         L.heading("Oldest open requests", 3),
                         L.table(["ID", "Category", "Status", "Age"], rows) if rows
