@@ -1,20 +1,19 @@
 """
 Branded Email Templates for Township 311 System
 
-Generates beautiful, responsive HTML email templates with township branding.
-Pulls configuration from SystemSettings for logo, colors, and township name.
+Every resident-facing message -- confirmation, status update, staff comment --
+is described here as content and rendered by `email_layout`, which owns the
+document, the palette and the plain-text half. Nothing in this module writes
+markup, and nothing in it escapes its own arguments: the layout's block
+helpers do that once, and escaping twice is how an apostrophe reaches an inbox
+as `&amp;#39;`.
+
+Translations for the strings live in EMAIL_I18N below, falling back to the
+Translate API for anything not held statically.
 """
 from typing import Optional, Dict
-import html
 
-
-def _h(value):
-    """HTML-escape a user-supplied string for safe interpolation into email
-    HTML. Prevents stored HTML/link injection into government-branded emails
-    from resident-controlled fields (description, comment, address, etc.)."""
-    if value is None:
-        return value
-    return html.escape(str(value), quote=True)
+from app.services import email_layout as L
 
 
 def _safe_url(value: Optional[str]) -> Optional[str]:
@@ -389,68 +388,106 @@ def get_i18n(lang: str) -> Dict[str, str]:
     return EMAIL_I18N.get(lang, EMAIL_I18N["en"])
 
 
-def get_base_template(
-    township_name: str,
-    logo_url: Optional[str],
-    primary_color: str = "#6366f1",
-    content: str = "",
-    footer_text: str = "",
-    language: str = "en"
-) -> str:
-    """
-    Base responsive email template with township branding.
-    Uses inline CSS for maximum email client compatibility.
-    """
-    i18n = get_i18n(language)
-    dir_attr = 'dir="rtl"' if language in ['ar', 'he', 'fa', 'ur', 'yi', 'ps'] else ''
-    
-    return f"""
-<!DOCTYPE html>
-<html lang="{language}" {dir_attr}>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{township_name} - 311 Service</title>
-</head>
-<body style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f1f5f9;">
-        <tr>
-            <td style="padding: 40px 20px;">
-                <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="margin: 0 auto; max-width: 600px;">
-                    <!-- Header -->
-                    <tr>
-                        <td style="background: linear-gradient(135deg, {primary_color} 0%, #4338ca 100%); padding: 32px; border-radius: 16px 16px 0 0; text-align: center;">
-                            {f'<img src="{logo_url}" alt="{township_name}" style="height: 48px; margin-bottom: 16px;">' if logo_url else ''}
-                            <h1 style="margin: 0; color: white; font-size: 24px; font-weight: 600;">{township_name}</h1>
-                            <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.8); font-size: 14px;">{i18n['service_portal']}</p>
-                        </td>
-                    </tr>
-                    
-                    <!-- Content -->
-                    <tr>
-                        <td style="background-color: white; padding: 32px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-                            {content}
-                        </td>
-                    </tr>
-                    
-                    <!-- Footer -->
-                    <tr>
-                        <td style="padding: 24px; text-align: center;">
-                            <p style="margin: 0 0 8px 0; color: #64748b; font-size: 13px;">
-                                {footer_text if footer_text else f"This is an automated message from {township_name} 311 Service."}
-                            </p>
-                            <p style="margin: 0; color: #94a3b8; font-size: 12px;">
-                                {i18n['no_reply']}
-                            </p>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-</body>
-</html>
-"""
+STATUS_TONES = {
+    "open": "warning",
+    "in_progress": "info",
+    "closed": "success",
+}
+
+
+def _status_label(new_status: str, i18n: Dict[str, str]) -> str:
+    return {
+        "open": i18n.get("status_open", "Open"),
+        "in_progress": i18n.get("status_in_progress", "In Progress"),
+        "closed": i18n.get("status_closed", "Resolved"),
+    }.get(new_status, str(new_status).replace("_", " ").title())
+
+
+def _tracking_url(portal_url: str, request_id: str) -> str:
+    return f"{(portal_url or '').rstrip('/')}/#track/{request_id}"
+
+
+def _absolute(url: Optional[str], portal_url: str) -> Optional[str]:
+    """Make a stored media path absolute. A relative src is a broken image in
+    every mail client -- there is no page for it to be relative to."""
+    if not url:
+        return None
+    if url.startswith("/"):
+        return f"{(portal_url or '').rstrip('/')}{url}"
+    return _safe_url(url)
+
+
+# --- Content, described once per email and rendered twice by email_layout ---
+#
+# Note that nothing below escapes its own arguments any more: the block helpers
+# in email_layout escape everything they are given, and escaping twice is how
+# a resident's apostrophe becomes "&amp;#39;" in the message they receive.
+
+def _confirmation_parts(i18n, township_name, request_id, service_name,
+                        description, address, portal_url):
+    tracking_url = _tracking_url(portal_url, request_id)
+    rows = [
+        (i18n.get("request_id", "Request ID"), f"#{request_id}"),
+        (i18n.get("category", "Category"), service_name),
+        (i18n.get("description", "Description"), (description or "")[:200]),
+    ]
+    if address:
+        rows.append((i18n.get("location", "Location"), address))
+    blocks = [
+        L.heading(i18n.get("request_received", "Request Received"), 2),
+        L.paragraph(i18n.get("report_submitted", "Your report has been submitted successfully")),
+        L.fields(rows),
+        L.button(i18n.get("track_request", "Track Your Request"), tracking_url),
+    ]
+    footer = [i18n.get("thank_you", "Thank you for helping make {township} a better place!")
+              .format(township=township_name)]
+    subject = i18n.get("subject_received", "Request #{id} Received - {township}").format(
+        id=request_id, township=township_name)
+    return subject, blocks, footer
+
+
+def _status_update_parts(i18n, township_name, request_id, service_name, new_status,
+                         completion_message, completion_photo_url, portal_url):
+    tracking_url = _tracking_url(portal_url, request_id)
+    label = _status_label(new_status, i18n)
+    blocks = [
+        L.heading(i18n.get("status_update", "Status Update"), 2),
+        L.paragraph(f"{i18n.get('request_id', 'Request ID')} #{request_id}"),
+        L.status_panel(i18n.get("current_status", "Current Status"), label,
+                       STATUS_TONES.get(new_status, "neutral")),
+        L.fields([(i18n.get("category", "Category"), service_name)]),
+    ]
+    if completion_message and new_status == "closed":
+        blocks.append(L.callout(completion_message, "success",
+                                title=i18n.get("resolution_notes", "Resolution Notes")))
+    photo = _absolute(completion_photo_url, portal_url) if new_status == "closed" else None
+    if photo:
+        blocks.append(L.image(photo, i18n.get("completion_photo", "Completion Photo")))
+    blocks.append(L.button(i18n.get("view_details", "View Request Details"), tracking_url))
+    subject = i18n.get("subject_status", "Request #{id} Status: {status} - {township}").format(
+        id=request_id, status=label, township=township_name)
+    footer = [i18n.get("receiving_because",
+                       "You're receiving this because you submitted a request to {township}.")
+              .format(township=township_name)]
+    return subject, blocks, footer
+
+
+def _comment_parts(i18n, township_name, request_id, service_name, comment_author,
+                   comment_content, portal_url):
+    tracking_url = _tracking_url(portal_url, request_id)
+    blocks = [
+        L.heading(i18n.get("new_update", "New Update on Your Request"), 2),
+        L.paragraph(f"{i18n.get('request_id', 'Request ID')} #{request_id} - {service_name}"),
+        L.callout(comment_content, "info",
+                  title=f"{comment_author} - {i18n.get('staff_member', 'Staff Member')}"),
+        L.button(i18n.get("view_conversation", "View Full Conversation"), tracking_url),
+    ]
+    subject = i18n.get("subject_comment", "New Update on Request #{id} - {township}").format(
+        id=request_id, township=township_name)
+    footer = [i18n.get("receiving_because",
+                       "You're receiving this because you submitted a request to {township}.")
+              .format(township=township_name)]
+    return subject, blocks, footer
 
 
 def build_confirmation_email(
@@ -464,89 +501,17 @@ def build_confirmation_email(
     portal_url: str,
     language: str = "en"
 ) -> Dict[str, str]:
-    """
-    Build email for new request confirmation.
-    Returns dict with 'subject', 'html', and 'text' keys.
-    """
-    service_name, description, address = _h(service_name), _h(description), _h(address)
-    tracking_url = f"{portal_url}/#track/{request_id}"
+    """New-request confirmation to the resident. {'subject','html','text'}."""
     i18n = get_i18n(language)
-    
-    content = f"""
-        <div style="text-align: center; margin-bottom: 24px;">
-            <div style="display: inline-block; background-color: #dcfce7; border-radius: 50%; width: 64px; height: 64px; line-height: 64px; margin-bottom: 16px;">
-                <span style="font-size: 32px;">✓</span>
-            </div>
-            <h2 style="margin: 0 0 8px 0; color: #1e293b; font-size: 22px; font-weight: 600;">{i18n['request_received']}</h2>
-            <p style="margin: 0; color: #64748b; font-size: 15px;">{i18n['report_submitted']}</p>
-        </div>
-        
-        <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                    <td style="padding: 8px 0; border-bottom: 1px solid #e2e8f0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['request_id']}</span>
-                        <p style="margin: 4px 0 0 0; color: {primary_color}; font-size: 18px; font-weight: 600;">#{request_id}</p>
-                    </td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px 0; border-bottom: 1px solid #e2e8f0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['category']}</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px; font-weight: 500;">{service_name}</p>
-                    </td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px 0;{' border-bottom: 1px solid #e2e8f0;' if address else ''}">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['description']}</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px;">{description[:200]}{'...' if len(description) > 200 else ''}</p>
-                    </td>
-                </tr>
-                {f'''
-                <tr>
-                    <td style="padding: 12px 0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['location']}</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px;">{address}</p>
-                    </td>
-                </tr>
-                ''' if address else ''}
-            </table>
-        </div>
-        
-        <div style="text-align: center;">
-            <a href="{tracking_url}" style="display: inline-block; background-color: {primary_color}; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 15px;">{i18n['track_request']}</a>
-            <p style="margin: 16px 0 0 0; color: #94a3b8; font-size: 13px;">
-                {i18n['or_visit']}: <a href="{tracking_url}" style="color: {primary_color};">{tracking_url}</a>
-            </p>
-        </div>
-    """
-    
-    html = get_base_template(
-        township_name=township_name,
-        logo_url=logo_url,
-        primary_color=primary_color,
-        content=content,
-        footer_text=i18n['thank_you'].format(township=township_name),
-        language=language
+    subject, blocks, footer = _confirmation_parts(
+        i18n, township_name, request_id, service_name, description, address, portal_url)
+    return L.build_email(
+        subject=subject, township_name=township_name, blocks=blocks,
+        logo_url=logo_url, primary_color=primary_color, footer_lines=footer,
+        language=language,
+        preheader=f"{i18n.get('request_id', 'Request ID')} #{request_id}",
+        no_reply_note=i18n.get("no_reply", "Please do not reply directly to this email."),
     )
-    
-    text = f"""
-{i18n['request_received']}
-
-{i18n['request_id']}: #{request_id}
-{i18n['category']}: {service_name}
-{i18n['description']}: {description[:200]}
-{f"{i18n['location']}: {address}" if address else ""}
-
-{i18n['track_request']}: {tracking_url}
-
-{i18n['thank_you'].format(township=township_name)}
-"""
-    
-    return {
-        "subject": i18n['subject_received'].format(id=request_id, township=township_name),
-        "html": html,
-        "text": text.strip()
-    }
 
 
 async def build_confirmation_email_async(
@@ -560,90 +525,18 @@ async def build_confirmation_email_async(
     portal_url: str,
     language: str = "en"
 ) -> Dict[str, str]:
-    """
-    Async version - Build email for new request confirmation.
-    Uses Google Translate API for any language not in the static dictionary.
-    Results are cached to minimize API calls.
-    """
-    service_name, description, address = _h(service_name), _h(description), _h(address)
-    tracking_url = f"{portal_url}/#track/{request_id}"
+    """As above, but translating through the Translate API for any language not
+    in the static dictionary."""
     i18n = await get_i18n_async(language)
-    
-    content = f"""
-        <div style="text-align: center; margin-bottom: 24px;">
-            <div style="display: inline-block; background-color: #dcfce7; border-radius: 50%; width: 64px; height: 64px; line-height: 64px; margin-bottom: 16px;">
-                <span style="font-size: 32px;">✓</span>
-            </div>
-            <h2 style="margin: 0 0 8px 0; color: #1e293b; font-size: 22px; font-weight: 600;">{i18n['request_received']}</h2>
-            <p style="margin: 0; color: #64748b; font-size: 15px;">{i18n['report_submitted']}</p>
-        </div>
-        
-        <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                    <td style="padding: 8px 0; border-bottom: 1px solid #e2e8f0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['request_id']}</span>
-                        <p style="margin: 4px 0 0 0; color: {primary_color}; font-size: 18px; font-weight: 600;">#{request_id}</p>
-                    </td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px 0; border-bottom: 1px solid #e2e8f0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['category']}</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px; font-weight: 500;">{service_name}</p>
-                    </td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px 0;{' border-bottom: 1px solid #e2e8f0;' if address else ''}">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['description']}</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px;">{description[:200]}{'...' if len(description) > 200 else ''}</p>
-                    </td>
-                </tr>
-                {f'''
-                <tr>
-                    <td style="padding: 12px 0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n['location']}</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px;">{address}</p>
-                    </td>
-                </tr>
-                ''' if address else ''}
-            </table>
-        </div>
-        
-        <div style="text-align: center;">
-            <a href="{tracking_url}" style="display: inline-block; background-color: {primary_color}; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 15px;">{i18n['track_request']}</a>
-            <p style="margin: 16px 0 0 0; color: #94a3b8; font-size: 13px;">
-                {i18n['or_visit']}: <a href="{tracking_url}" style="color: {primary_color};">{tracking_url}</a>
-            </p>
-        </div>
-    """
-    
-    html = get_base_template(
-        township_name=township_name,
-        logo_url=logo_url,
-        primary_color=primary_color,
-        content=content,
-        footer_text=i18n['thank_you'].format(township=township_name),
-        language=language
+    subject, blocks, footer = _confirmation_parts(
+        i18n, township_name, request_id, service_name, description, address, portal_url)
+    return L.build_email(
+        subject=subject, township_name=township_name, blocks=blocks,
+        logo_url=logo_url, primary_color=primary_color, footer_lines=footer,
+        language=language,
+        preheader=f"{i18n.get('request_id', 'Request ID')} #{request_id}",
+        no_reply_note=i18n.get("no_reply", "Please do not reply directly to this email."),
     )
-    
-    text = f"""
-{i18n['request_received']}
-
-{i18n['request_id']}: #{request_id}
-{i18n['category']}: {service_name}
-{i18n['description']}: {description[:200]}
-{f"{i18n['location']}: {address}" if address else ""}
-
-{i18n['track_request']}: {tracking_url}
-
-{i18n['thank_you'].format(township=township_name)}
-"""
-    
-    return {
-        "subject": i18n['subject_received'].format(id=request_id, township=township_name),
-        "html": html,
-        "text": text.strip()
-    }
 
 
 def build_status_update_email(
@@ -656,102 +549,47 @@ def build_status_update_email(
     new_status: str,
     completion_message: Optional[str],
     completion_photo_url: Optional[str],
-    portal_url: str
+    portal_url: str,
+    language: str = "en"
 ) -> Dict[str, str]:
-    """
-    Build email for status update notification.
-    Includes completion photo if provided (for closed requests).
-    """
-    service_name, completion_message = _h(service_name), _h(completion_message)
-    completion_photo_url = _safe_url(completion_photo_url)
-    tracking_url = f"{portal_url}/#track/{request_id}"
-    
-    status_configs = {
-        "open": {"label": "Open", "color": "#f59e0b", "bg": "#fef3c7", "icon": "circle"},
-        "in_progress": {"label": "In Progress", "color": "#3b82f6", "bg": "#dbeafe", "icon": "clock"},
-        "closed": {"label": "Resolved", "color": "#16a34a", "bg": "#dcfce7", "icon": "check-circle"}
-    }
-    
-    status_config = status_configs.get(new_status, {"label": new_status.replace("_", " ").title(), "color": "#64748b", "bg": "#f1f5f9", "icon": "circle"})
-    
-    # Build completion photo section if available
-    completion_photo_section = ""
-    if completion_photo_url and new_status == "closed":
-        # Convert relative URLs to absolute for email compatibility
-        if completion_photo_url.startswith('/'):
-            # Remove trailing slash from portal_url if present and prepend
-            base_url = portal_url.rstrip('/')
-            photo_full_url = f"{base_url}{completion_photo_url}"
-        else:
-            photo_full_url = completion_photo_url
-            
-        completion_photo_section = f'''
-        <div style="margin-bottom: 24px; text-align: center;">
-            <p style="margin: 0 0 12px 0; color: #166534; font-size: 13px; font-weight: 600;">Completion Photo</p>
-            <img src="{photo_full_url}" alt="Completion photo" style="max-width: 100%; height: auto; border-radius: 12px; border: 2px solid #dcfce7; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-        </div>
-        '''
-    
-    content = f"""
-        <div style="text-align: center; margin-bottom: 24px;">
-            <h2 style="margin: 0 0 8px 0; color: #1e293b; font-size: 22px; font-weight: 600;">Status Update</h2>
-            <p style="margin: 0; color: #64748b; font-size: 15px;">Request #{request_id}</p>
-        </div>
-        
-        <div style="background-color: {status_config['bg']}; border-radius: 12px; padding: 24px; margin-bottom: 24px; text-align: center;">
-            <p style="margin: 0 0 8px 0; color: {status_config['color']}; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">Current Status</p>
-            <p style="margin: 0; color: {status_config['color']}; font-size: 24px; font-weight: 700;">{status_config['label']}</p>
-        </div>
-        
-        <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                    <td style="padding: 8px 0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Category</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px; font-weight: 500;">{service_name}</p>
-                    </td>
-                </tr>
-            </table>
-        </div>
-        
-        {f'''
-        <div style="background-color: #f0fdf4; border-left: 4px solid #16a34a; border-radius: 0 8px 8px 0; padding: 16px; margin-bottom: 24px;">
-            <p style="margin: 0 0 4px 0; color: #166534; font-size: 13px; font-weight: 600;">Resolution Notes</p>
-            <p style="margin: 0; color: #15803d; font-size: 15px;">{completion_message}</p>
-        </div>
-        ''' if completion_message and new_status == 'closed' else ''}
-        
-        {completion_photo_section}
-        
-        <div style="text-align: center;">
-            <a href="{tracking_url}" style="display: inline-block; background-color: {primary_color}; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 15px;">View Request Details</a>
-        </div>
-    """
-    
-    html = get_base_template(
-        township_name=township_name,
-        logo_url=logo_url,
-        primary_color=primary_color,
-        content=content
+    """Status change notification to the resident, with the completion photo
+    when the request was closed with one."""
+    i18n = get_i18n(language)
+    subject, blocks, footer = _status_update_parts(
+        i18n, township_name, request_id, service_name, new_status,
+        completion_message, completion_photo_url, portal_url)
+    return L.build_email(
+        subject=subject, township_name=township_name, blocks=blocks,
+        logo_url=logo_url, primary_color=primary_color, footer_lines=footer,
+        language=language, preheader=subject,
+        no_reply_note=i18n.get("no_reply", "Please do not reply directly to this email."),
     )
-    
-    text = f"""
-Status Update for Request #{request_id}
 
-Your request status has been updated to: {status_config['label']}
 
-Category: {service_name}
-{f"Resolution Notes: {completion_message}" if completion_message and new_status == 'closed' else ""}
-{f"Completion Photo: {completion_photo_url}" if completion_photo_url and new_status == 'closed' else ""}
-
-View details at: {tracking_url}
-"""
-    
-    return {
-        "subject": f"Request #{request_id} Status: {status_config['label']} - {township_name}",
-        "html": html,
-        "text": text.strip()
-    }
+async def build_status_update_email_async(
+    township_name: str,
+    logo_url: Optional[str],
+    primary_color: str,
+    request_id: str,
+    service_name: str,
+    old_status: str,
+    new_status: str,
+    completion_message: Optional[str],
+    completion_photo_url: Optional[str],
+    portal_url: str,
+    language: str = "en"
+) -> Dict[str, str]:
+    """As above, translated."""
+    i18n = await get_i18n_async(language)
+    subject, blocks, footer = _status_update_parts(
+        i18n, township_name, request_id, service_name, new_status,
+        completion_message, completion_photo_url, portal_url)
+    return L.build_email(
+        subject=subject, township_name=township_name, blocks=blocks,
+        logo_url=logo_url, primary_color=primary_color, footer_lines=footer,
+        language=language, preheader=subject,
+        no_reply_note=i18n.get("no_reply", "Please do not reply directly to this email."),
+    )
 
 
 def build_comment_email(
@@ -762,76 +600,45 @@ def build_comment_email(
     service_name: str,
     comment_author: str,
     comment_content: str,
-    portal_url: str
+    portal_url: str,
+    language: str = "en"
 ) -> Dict[str, str]:
-    """
-    Build email for new public comment notification.
-    Uses table-based layout for email client compatibility.
-    """
-    service_name, comment_author, comment_content = _h(service_name), _h(comment_author), _h(comment_content)
-    tracking_url = f"{portal_url}/#track/{request_id}"
-    author_initial = comment_author[0].upper() if comment_author else "S"
-    
-    content = f"""
-        <div style="text-align: center; margin-bottom: 24px;">
-            <div style="display: inline-block; background-color: #dbeafe; border-radius: 50%; width: 56px; height: 56px; line-height: 56px; margin-bottom: 16px;">
-                <span style="color: #3b82f6; font-size: 24px;">💬</span>
-            </div>
-            <h2 style="margin: 0 0 8px 0; color: #1e293b; font-size: 22px; font-weight: 600;">New Update on Your Request</h2>
-            <p style="margin: 0; color: {primary_color}; font-size: 15px; font-weight: 500;">Request #{request_id} • {service_name}</p>
-        </div>
-        
-        <div style="background-color: #f8fafc; border-radius: 12px; padding: 24px; margin-bottom: 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
-                <tr>
-                    <td width="48" valign="top" style="padding-right: 12px;">
-                        <div style="background-color: {primary_color}; color: white; width: 44px; height: 44px; border-radius: 50%; text-align: center; line-height: 44px; font-weight: 600; font-size: 18px;">
-                            {author_initial}
-                        </div>
-                    </td>
-                    <td valign="middle">
-                        <p style="margin: 0 0 2px 0; color: #1e293b; font-size: 16px; font-weight: 600;">{comment_author}</p>
-                        <p style="margin: 0; color: {primary_color}; font-size: 13px; font-weight: 500;">Staff Member</p>
-                    </td>
-                </tr>
-            </table>
-            
-            <div style="background-color: white; border-radius: 8px; padding: 16px; border-left: 4px solid {primary_color};">
-                <p style="margin: 0; color: #1e293b; font-size: 15px; line-height: 1.7;">"{comment_content}"</p>
-            </div>
-        </div>
-        
-        <div style="text-align: center;">
-            <a href="{tracking_url}" style="display: inline-block; background-color: {primary_color}; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 15px;">View Full Conversation</a>
-            <p style="margin: 16px 0 0 0; color: #94a3b8; font-size: 13px;">
-                or visit: <a href="{tracking_url}" style="color: {primary_color};">{tracking_url}</a>
-            </p>
-        </div>
-    """
-    
-    html = get_base_template(
-        township_name=township_name,
-        logo_url=logo_url,
-        primary_color=primary_color,
-        content=content,
-        footer_text=f"You're receiving this because you submitted a request to {township_name}."
+    """A staff member's public comment, sent to the resident who filed."""
+    i18n = get_i18n(language)
+    subject, blocks, footer = _comment_parts(
+        i18n, township_name, request_id, service_name, comment_author,
+        comment_content, portal_url)
+    return L.build_email(
+        subject=subject, township_name=township_name, blocks=blocks,
+        logo_url=logo_url, primary_color=primary_color, footer_lines=footer,
+        language=language, preheader=subject,
+        no_reply_note=i18n.get("no_reply", "Please do not reply directly to this email."),
     )
-    
-    text = f"""
-New Update on Your Request #{request_id}
 
-{comment_author} (Staff) wrote:
 
-"{comment_content}"
+async def build_comment_email_async(
+    township_name: str,
+    logo_url: Optional[str],
+    primary_color: str,
+    request_id: str,
+    service_name: str,
+    comment_author: str,
+    comment_content: str,
+    portal_url: str,
+    language: str = "en"
+) -> Dict[str, str]:
+    """As above, translated."""
+    i18n = await get_i18n_async(language)
+    subject, blocks, footer = _comment_parts(
+        i18n, township_name, request_id, service_name, comment_author,
+        comment_content, portal_url)
+    return L.build_email(
+        subject=subject, township_name=township_name, blocks=blocks,
+        logo_url=logo_url, primary_color=primary_color, footer_lines=footer,
+        language=language, preheader=subject,
+        no_reply_note=i18n.get("no_reply", "Please do not reply directly to this email."),
+    )
 
-View the full conversation at: {tracking_url}
-"""
-    
-    return {
-        "subject": f"New Update on Request #{request_id} - {township_name}",
-        "html": html,
-        "text": text.strip()
-    }
 
 
 def build_sms_confirmation(request_id: str, township_name: str, portal_url: str = "", service_name: str = "", description: str = "", address: str = "") -> str:
@@ -896,204 +703,6 @@ Your request {status_text}!"""
 
 
 # ==================== ASYNC VERSIONS WITH GOOGLE TRANSLATE ====================
-
-async def build_status_update_email_async(
-    township_name: str,
-    logo_url: Optional[str],
-    primary_color: str,
-    request_id: str,
-    service_name: str,
-    old_status: str,
-    new_status: str,
-    completion_message: Optional[str],
-    completion_photo_url: Optional[str],
-    portal_url: str,
-    language: str = "en"
-) -> Dict[str, str]:
-    """
-    Async version - Build email for status update notification.
-    Uses Google Translate API for any language not in the static dictionary.
-    """
-    service_name, completion_message = _h(service_name), _h(completion_message)
-    completion_photo_url = _safe_url(completion_photo_url)
-    tracking_url = f"{portal_url}/#track/{request_id}"
-    i18n = await get_i18n_async(language)
-    
-    # Get translated status labels
-    status_labels = {
-        "open": i18n.get("status_open", "Open"),
-        "in_progress": i18n.get("status_in_progress", "In Progress"),
-        "closed": i18n.get("status_closed", "Resolved")
-    }
-    
-    status_configs = {
-        "open": {"label": status_labels["open"], "color": "#f59e0b", "bg": "#fef3c7"},
-        "in_progress": {"label": status_labels["in_progress"], "color": "#3b82f6", "bg": "#dbeafe"},
-        "closed": {"label": status_labels["closed"], "color": "#16a34a", "bg": "#dcfce7"}
-    }
-    
-    status_config = status_configs.get(new_status, {"label": new_status.replace("_", " ").title(), "color": "#64748b", "bg": "#f1f5f9"})
-    
-    # Build completion photo section if available
-    completion_photo_section = ""
-    if completion_photo_url and new_status == "closed":
-        if completion_photo_url.startswith('/'):
-            base_url = portal_url.rstrip('/')
-            photo_full_url = f"{base_url}{completion_photo_url}"
-        else:
-            photo_full_url = completion_photo_url
-            
-        completion_photo_section = f'''
-        <div style="margin-bottom: 24px; text-align: center;">
-            <p style="margin: 0 0 12px 0; color: #166534; font-size: 13px; font-weight: 600;">{i18n.get("completion_photo", "Completion Photo")}</p>
-            <img src="{photo_full_url}" alt="Completion photo" style="max-width: 100%; height: auto; border-radius: 12px; border: 2px solid #dcfce7;">
-        </div>
-        '''
-    
-    content = f"""
-        <div style="text-align: center; margin-bottom: 24px;">
-            <h2 style="margin: 0 0 8px 0; color: #1e293b; font-size: 22px; font-weight: 600;">{i18n.get("status_update", "Status Update")}</h2>
-            <p style="margin: 0; color: #64748b; font-size: 15px;">{i18n.get("request_id", "Request ID")} #{request_id}</p>
-        </div>
-        
-        <div style="background-color: {status_config['bg']}; border-radius: 12px; padding: 24px; margin-bottom: 24px; text-align: center;">
-            <p style="margin: 0 0 8px 0; color: {status_config['color']}; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">{i18n.get("current_status", "Current Status")}</p>
-            <p style="margin: 0; color: {status_config['color']}; font-size: 24px; font-weight: 700;">{status_config['label']}</p>
-        </div>
-        
-        <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                    <td style="padding: 8px 0;">
-                        <span style="color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">{i18n.get("category", "Category")}</span>
-                        <p style="margin: 4px 0 0 0; color: #1e293b; font-size: 15px; font-weight: 500;">{service_name}</p>
-                    </td>
-                </tr>
-            </table>
-        </div>
-        
-        {f'''
-        <div style="background-color: #f0fdf4; border-left: 4px solid #16a34a; border-radius: 0 8px 8px 0; padding: 16px; margin-bottom: 24px;">
-            <p style="margin: 0 0 4px 0; color: #166534; font-size: 13px; font-weight: 600;">{i18n.get("resolution_notes", "Resolution Notes")}</p>
-            <p style="margin: 0; color: #15803d; font-size: 15px;">{completion_message}</p>
-        </div>
-        ''' if completion_message and new_status == 'closed' else ''}
-        
-        {completion_photo_section}
-        
-        <div style="text-align: center;">
-            <a href="{tracking_url}" style="display: inline-block; background-color: {primary_color}; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 15px;">{i18n.get("view_details", "View Request Details")}</a>
-        </div>
-    """
-    
-    html = get_base_template(
-        township_name=township_name,
-        logo_url=logo_url,
-        primary_color=primary_color,
-        content=content,
-        language=language
-    )
-    
-    text = f"""
-{i18n.get("status_update", "Status Update")} - {i18n.get("request_id", "Request ID")} #{request_id}
-
-{i18n.get("your_request_status", "Your request status has been updated")}: {status_config['label']}
-
-{i18n.get("category", "Category")}: {service_name}
-{f"{i18n.get('resolution_notes', 'Resolution Notes')}: {completion_message}" if completion_message and new_status == 'closed' else ""}
-
-{i18n.get("view_details", "View details")}: {tracking_url}
-"""
-    
-    return {
-        "subject": i18n.get("subject_status", "Request #{id} Status: {status} - {township}").format(id=request_id, status=status_config['label'], township=township_name),
-        "html": html,
-        "text": text.strip()
-    }
-
-
-async def build_comment_email_async(
-    township_name: str,
-    logo_url: Optional[str],
-    primary_color: str,
-    request_id: str,
-    service_name: str,
-    comment_author: str,
-    comment_content: str,
-    portal_url: str,
-    language: str = "en"
-) -> Dict[str, str]:
-    """
-    Async version - Build email for new public comment notification.
-    Uses Google Translate API for any language not in the static dictionary.
-    """
-    service_name, comment_author, comment_content = _h(service_name), _h(comment_author), _h(comment_content)
-    tracking_url = f"{portal_url}/#track/{request_id}"
-    author_initial = comment_author[0].upper() if comment_author else "S"
-    i18n = await get_i18n_async(language)
-    
-    content = f"""
-        <div style="text-align: center; margin-bottom: 24px;">
-            <div style="display: inline-block; background-color: #dbeafe; border-radius: 50%; width: 56px; height: 56px; line-height: 56px; margin-bottom: 16px;">
-                <span style="color: #3b82f6; font-size: 24px;">💬</span>
-            </div>
-            <h2 style="margin: 0 0 8px 0; color: #1e293b; font-size: 22px; font-weight: 600;">{i18n.get("new_update", "New Update on Your Request")}</h2>
-            <p style="margin: 0; color: {primary_color}; font-size: 15px; font-weight: 500;">{i18n.get("request_id", "Request ID")} #{request_id} • {service_name}</p>
-        </div>
-        
-        <div style="background-color: #f8fafc; border-radius: 12px; padding: 24px; margin-bottom: 24px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
-                <tr>
-                    <td width="48" valign="top" style="padding-right: 12px;">
-                        <div style="background-color: {primary_color}; color: white; width: 44px; height: 44px; border-radius: 50%; text-align: center; line-height: 44px; font-weight: 600; font-size: 18px;">
-                            {author_initial}
-                        </div>
-                    </td>
-                    <td valign="middle">
-                        <p style="margin: 0 0 2px 0; color: #1e293b; font-size: 16px; font-weight: 600;">{comment_author}</p>
-                        <p style="margin: 0; color: {primary_color}; font-size: 13px; font-weight: 500;">{i18n.get("staff_member", "Staff Member")}</p>
-                    </td>
-                </tr>
-            </table>
-            
-            <div style="background-color: white; border-radius: 8px; padding: 16px; border-left: 4px solid {primary_color};">
-                <p style="margin: 0; color: #1e293b; font-size: 15px; line-height: 1.7;">"{comment_content}"</p>
-            </div>
-        </div>
-        
-        <div style="text-align: center;">
-            <a href="{tracking_url}" style="display: inline-block; background-color: {primary_color}; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 15px;">{i18n.get("view_conversation", "View Full Conversation")}</a>
-            <p style="margin: 16px 0 0 0; color: #94a3b8; font-size: 13px;">
-                {i18n.get("or_visit", "or visit")}: <a href="{tracking_url}" style="color: {primary_color};">{tracking_url}</a>
-            </p>
-        </div>
-    """
-    
-    html = get_base_template(
-        township_name=township_name,
-        logo_url=logo_url,
-        primary_color=primary_color,
-        content=content,
-        footer_text=i18n.get("receiving_because", "You're receiving this because you submitted a request to {township}.").format(township=township_name),
-        language=language
-    )
-    
-    text = f"""
-{i18n.get("new_update", "New Update on Your Request")} #{request_id}
-
-{comment_author} ({i18n.get("staff_member", "Staff Member")}):
-
-"{comment_content}"
-
-{i18n.get("view_conversation", "View the full conversation")}: {tracking_url}
-"""
-    
-    return {
-        "subject": i18n.get("subject_comment", "New Update on Request #{id} - {township}").format(id=request_id, township=township_name),
-        "html": html,
-        "text": text.strip()
-    }
-
 
 async def build_sms_confirmation_async(
     request_id: str,
