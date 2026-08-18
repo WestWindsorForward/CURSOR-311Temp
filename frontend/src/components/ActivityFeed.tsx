@@ -22,6 +22,21 @@ interface FeedItem {
     isNew: boolean;
 }
 
+/**
+ * A stable, unique handle for one request's feed items.
+ *
+ * `service_request_id` is the natural choice, but it can arrive empty -- an
+ * intake that never got one, or a partially-hydrated row -- and every such
+ * request then produced the same React key (`new-`, `dept-`), so React
+ * collapsed them and dropped entries from the rendered feed. Fall back to the
+ * numeric primary key, and to the list position only if even that is missing.
+ */
+function requestKey(request: ServiceRequest, index: number): string {
+    if (request.service_request_id) return String(request.service_request_id);
+    if (request.id !== undefined && request.id !== null) return `id-${request.id}`;
+    return `idx-${index}`;
+}
+
 export default function ActivityFeed({
     isOpen,
     onClose,
@@ -42,7 +57,8 @@ export default function ActivityFeed({
         const twentyFourHours = 24 * 60 * 60 * 1000;
         const sevenDays = 7 * 24 * 60 * 60 * 1000;
 
-        requests.forEach(request => {
+        requests.forEach((request, index) => {
+            const key = requestKey(request, index);
             const requestTime = new Date(request.requested_datetime).getTime();
             const requestAge = now - requestTime;
 
@@ -65,25 +81,25 @@ export default function ActivityFeed({
             // New request attached to you or your department (< 24 hours)
             if (requestAge < twentyFourHours) {
                 items.push({
-                    id: `new-${request.service_request_id}`,
+                    id: `new-${key}`,
                     type: mine ? 'assigned_to_me' : 'new_request',
                     title: mine ? `New & assigned to you: ${request.service_name}` : `New: ${request.service_name}`,
                     description: (request.description?.substring(0, 80) + (request.description && request.description.length > 80 ? '...' : '')) || `Request #${request.service_request_id}`,
                     timestamp: new Date(request.requested_datetime),
                     request,
-                    isNew: !readItems.has(`new-${request.service_request_id}`)
+                    isNew: !readItems.has(`new-${key}`)
                 });
             }
             // Otherwise, a recent status/activity update on a request relevant to you
             else if (wasUpdated && (now - (updatedTime as number)) < twentyFourHours * 2) {
                 items.push({
-                    id: `upd-${request.service_request_id}-${updatedTime}`,
+                    id: `upd-${key}-${updatedTime}`,
                     type: 'status_change',
                     title: `Updated: ${request.service_name}`,
                     description: `Status: ${String(request.status).replace(/_/g, ' ')}${mine ? ' · assigned to you' : ''}`,
                     timestamp: new Date(request.updated_datetime as string),
                     request,
-                    isNew: !readItems.has(`upd-${request.service_request_id}-${updatedTime}`)
+                    isNew: !readItems.has(`upd-${key}-${updatedTime}`)
                 });
             }
 
@@ -91,13 +107,13 @@ export default function ActivityFeed({
             if (deptMatch && !request.assigned_to &&
                 requestAge >= twentyFourHours && requestAge < twentyFourHours * 3) {
                 items.push({
-                    id: `dept-${request.service_request_id}`,
+                    id: `dept-${key}`,
                     type: 'assigned_to_dept',
                     title: `Needs attention: ${request.service_name}`,
                     description: 'Assigned to your department but no individual owner',
                     timestamp: new Date(request.requested_datetime),
                     request,
-                    isNew: !readItems.has(`dept-${request.service_request_id}`)
+                    isNew: !readItems.has(`dept-${key}`)
                 });
             }
         });
@@ -266,7 +282,8 @@ export function useActivityFeedCount(
         const now = Date.now();
         const twentyFourHours = 24 * 60 * 60 * 1000;
 
-        requests.forEach(request => {
+        requests.forEach((request, index) => {
+            const key = requestKey(request, index);
             const requestTime = new Date(request.requested_datetime).getTime();
             const requestAge = now - requestTime;
             if (requestAge > twentyFourHours * 2) return;
@@ -281,11 +298,11 @@ export function useActivityFeedCount(
 
             // New request attached to you or your department
             if (requestAge < twentyFourHours) {
-                if (!readItems.has(`new-${request.service_request_id}`)) count++;
+                if (!readItems.has(`new-${key}`)) count++;
             }
             // Recent status/activity update on a relevant request
             else if (wasUpdated && (now - (updatedTime as number)) < twentyFourHours * 2) {
-                if (!readItems.has(`upd-${request.service_request_id}-${updatedTime}`)) count++;
+                if (!readItems.has(`upd-${key}-${updatedTime}`)) count++;
             }
         });
 
