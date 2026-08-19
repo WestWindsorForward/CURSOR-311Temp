@@ -169,16 +169,28 @@ async def test_a_photo_blocked_at_pick_time_still_blocks_at_submit(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_photo_that_could_not_be_screened_is_withheld_not_published(monkeypatch):
+async def test_a_photo_that_could_not_be_screened_is_never_published(monkeypatch):
     """The detector never answered, so nothing established that there is no face
-    in it. It goes to staff, and the report still goes through."""
+    in it -- and, because the pick-time endpoint stores nothing when screening
+    fails, there are no bytes here to hold back either.
+
+    So the handle is reported as stale: the caller still has the original and is
+    asked to resend it inline, where the submit path screens it properly. The
+    earlier behaviour recorded a withheld entry whose `media` was the empty
+    string, which is a photo the resident believes they attached, that no error
+    mentions, and that nobody ever sees.
+
+    The guarantee under test is unchanged either way: it is not published."""
     _rows(monkeypatch, {"t1": _Row(verdict="needs_review", reason="provider-error")})
 
     out = await ph.resolve(None, [_handle("t1")])
 
-    assert out.withheld == [{"media": "", "reason": "provider-error"}]
     assert out.screened == []
     assert not out.blocked
+    # Nothing empty was smuggled into the report as an attachment.
+    assert out.withheld == []
+    # And the caller is told, so the photo can be resent rather than lost.
+    assert out.stale == [_handle("t1")]
 
 
 @pytest.mark.asyncio
