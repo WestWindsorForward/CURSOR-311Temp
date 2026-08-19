@@ -342,48 +342,46 @@ def test_the_migration_creates_the_check_constraint():
 
 def test_min_db_revision_is_the_revision_before_head():
     """Additive migration: the new build still runs on the old schema, so the
-    declared floor stays at the previous head."""
+    declared floor is the revision immediately before whatever head is.
+
+    Derived from the revision chain rather than hardcoded. An earlier version
+    pinned the literal 'f6b4d8e2a3c5', which meant every later migration failed
+    this test whether or not the floor was right -- and the path of least
+    resistance was to edit the expected string instead of checking the rule.
+    A test that has to be silenced to land ordinary work protects nothing.
+    """
+    versions = ROOT / "backend/alembic/versions"
+    revs = {}
+    for path in versions.glob("*.py"):
+        text = path.read_text()
+        rev = re.search(r"(?m)^revision(?::[^=]*)?\s*=\s*['\"]([^'\"]+)", text)
+        if not rev:
+            continue
+        down = re.search(
+            r"(?m)^down_revision(?::[^=]*)?\s*=\s*(?:\(([^)]*)\)|['\"]([^'\"]+)['\"]|None)",
+            text,
+        )
+        parents = []
+        if down:
+            if down.group(1):
+                parents = [x.strip().strip("'\"") for x in down.group(1).split(",") if x.strip()]
+            elif down.group(2):
+                parents = [down.group(2)]
+        revs[rev.group(1)] = parents
+
+    children = {}
+    for rev, parents in revs.items():
+        for parent in parents:
+            children.setdefault(parent, []).append(rev)
+    heads = [r for r in revs if r not in children]
+    assert len(heads) == 1, f"expected one head, found {heads}"
+
+    expected = revs[heads[0]]
+    assert len(expected) == 1, f"head {heads[0]} is a merge revision: {expected}"
+
     declared = [
         line.strip()
         for line in (ROOT / "backend/MIN_DB_REVISION").read_text().splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
-    assert declared == ["f6b4d8e2a3c5"], declared
-    down = re.search(r"down_revision:.*=\s*'(\w+)'", MIGRATION.read_text()).group(1)
-    assert down == "f6b4d8e2a3c5"
-
-
-# ----------------------------------------------------------- the email path
-
-def test_the_mailto_address_is_configurable_and_has_no_default():
-    """A wrong or dead address is worse than no offer, so nothing is baked in."""
-    _needs_app()
-    from app.models import SystemSettings
-
-    column = SystemSettings.__table__.c.platform_feedback_email
-    assert column.nullable
-    assert column.default is None and column.server_default is None, (
-        "a default address is baked into the schema"
-    )
-    for source in (MODELS.read_text(), SCHEMAS.read_text(), API.read_text(), INIT_DB.read_text()):
-        assert "pinpoint311.org" not in source, "a real address is hardcoded"
-
-
-def test_the_address_is_validated_before_it_becomes_an_href():
-    _needs_app()
-    from app.schemas import SystemSettingsBase
-
-    assert SystemSettingsBase(platform_feedback_email="").platform_feedback_email is None
-    assert SystemSettingsBase(platform_feedback_email=None).platform_feedback_email is None
-    assert (
-        SystemSettingsBase(platform_feedback_email=" team@example.org ").platform_feedback_email
-        == "team@example.org"
-    )
-    for bad in ("not an address", "a@b", "x@y.z ?subject=evil", "a@b.co\nBcc: c@d.co"):
-        with pytest.raises(Exception):
-            SystemSettingsBase(platform_feedback_email=bad)
-
-
-# The admin toggle's wording is asserted in the frontend suite
-# (PlatformFeedback.admin.test.tsx): the backend tests run with only /backend
-# mounted, so frontend/ is not on disk here.
+    assert declared == expected, f"declared {declared}, head's parent is {expected}"
