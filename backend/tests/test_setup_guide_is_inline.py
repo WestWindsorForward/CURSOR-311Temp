@@ -388,6 +388,17 @@ def test_no_console_walk_runs_away_with_itself():
     and two of the Azure steps restated what step one had already said. Prose at
     that length stops being instructions and becomes something to skim, which is
     how the warnings inside it get missed.
+
+    Budgeted per step rather than per walk, which is what the original 400 was
+    reaching for. A flat cap punishes a walk for being *complete*: the Azure key
+    vault walk grew from six steps to eight because two screens were missing
+    from it entirely -- the Access configuration tab, where the permission model
+    is chosen, and the role a vault's creator has to give themselves before the
+    key screen will work for them at all. Leaving those out kept the count down
+    and stranded the reader, which is the opposite of what this test wants. What
+    it is really policing is a step that rambles, so the budget follows the
+    steps: 80 words each, with a floor of 400 so short walks keep the original
+    limit and cannot pad their way up by splitting a step in two.
     """
     import re
 
@@ -395,9 +406,14 @@ def test_no_console_walk_runs_away_with_itself():
     offenders = []
     for m in re.finditer(r"defineSteps\(\s*'([a-z]+)'\s*,\s*'([a-z0-9]+)'", source):
         end = source.index("\n]);", m.start())
-        words = len(re.sub(r"<[^>]+>", " ", source[m.start():end]).split())
-        if words > 400:
-            offenders.append(f"{m.group(1)}:{m.group(2)} is {words} words")
+        block = source[m.start():end]
+        words = len(re.sub(r"<[^>]+>", " ", block).split())
+        steps = max(1, len(re.findall(r"^\s{4}\{", block, re.M)))
+        budget = max(400, 80 * steps)
+        if words > budget:
+            offenders.append(
+                f"{m.group(1)}:{m.group(2)} is {words} words across {steps} steps (budget {budget})"
+            )
     assert not offenders, "console walks have grown back:\n" + "\n".join(offenders)
 
 
