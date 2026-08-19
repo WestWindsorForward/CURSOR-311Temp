@@ -266,7 +266,14 @@ async def resolve(db, media: Optional[List[Any]]) -> ResolvedMedia:
             out.blocked = True
             continue
         if row.verdict != "ready" or not row.media:
-            out.withheld.append({"media": "", "reason": row.reason or "needs-review"})
+            # Screening never produced bytes we can publish -- Vision timed out,
+            # the provider errored, or the image would not decode. The pick-time
+            # endpoint deliberately stores nothing in that case, so there is no
+            # copy here to fall back on. Treat it exactly like a stale handle:
+            # the client still holds the original, so ask for it rather than
+            # recording a withheld entry with an empty `media`, which is a photo
+            # the resident believes they attached and nobody ever sees again.
+            out.stale.append(item)
             continue
 
         out.screened.append((index, row.media))

@@ -527,6 +527,11 @@ export default function ResidentPortal() {
         window.history.replaceState(null, '', window.location.pathname);
     };
 
+    /* Screening verdicts that arrived before their photo row existed, keyed by
+     * photo id. Screening and the FileReader preview run in parallel and either
+     * can finish first; this is where the fast one waits. */
+    const pendingPhotoPatches = useRef<Record<string, Partial<AttachedPhoto>>>({});
+
     /** Update one photo by identity rather than position.
      *
      * Positions move: a resident can remove the first photo while the third is
@@ -535,7 +540,22 @@ export default function ResidentPortal() {
      * id, and a result for a photo that has since been removed lands nowhere,
      * which is what should happen. */
     const updatePhoto = (id: string, patch: Partial<AttachedPhoto>) => {
-        setAttachedPhotos((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+        setAttachedPhotos((prev) => {
+            if (!prev.some((p) => p.id === id)) {
+                // The result beat the preview. Screening starts in parallel with
+                // the FileReader and is often faster, so the row this patch names
+                // may not exist yet -- and mapping over a list that does not
+                // contain it drops the verdict on the floor, after which the
+                // insert below writes `uploading` and the photo sits there
+                // forever. Hold the patch and let the insert apply it.
+                pendingPhotoPatches.current[id] = {
+                    ...(pendingPhotoPatches.current[id] || {}),
+                    ...patch,
+                };
+                return prev;
+            }
+            return prev.map((p) => (p.id === id ? { ...p, ...patch } : p));
+        });
     };
 
     const handlePhotoUpload = (files: FileList) => {
@@ -551,11 +571,19 @@ export default function ResidentPortal() {
             const reader = new FileReader();
             reader.onloadend = () => {
                 const dataUrl = reader.result as string;
-                setAttachedPhotos((prev) => (
-                    prev.length >= 3
-                        ? prev
-                        : [...prev, { id, previewUrl: dataUrl, original: dataUrl, state: 'uploading' }]
-                ));
+                setAttachedPhotos((prev) => {
+                    if (prev.length >= 3) return prev;
+                    // Anything screening decided while this preview was loading.
+                    const early = pendingPhotoPatches.current[id];
+                    delete pendingPhotoPatches.current[id];
+                    return [...prev, {
+                        id,
+                        previewUrl: dataUrl,
+                        original: dataUrl,
+                        state: 'uploading',
+                        ...(early || {}),
+                    }];
+                });
             };
             reader.readAsDataURL(file);
 

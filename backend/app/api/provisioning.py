@@ -315,11 +315,22 @@ async def set_managed_settings(
 
     # PII anonymization on/off maps to the retention archive mode; an explicit
     # retention_mode wins if provided.
+    # The canonical modes are `redact` and `purge` (retention_scrub.REDACT /
+    # PURGE, and the column default). `anonymize`/`delete` are the older names
+    # and still arrive from hosts that have not been updated, so both spellings
+    # are accepted and normalised here. Before this, a host pushing the current
+    # names had its policy silently ignored -- the write simply did not happen,
+    # and the town kept whatever mode it already had while the panel reported
+    # the push as applied.
+    _MODES = {
+        "redact": "redact", "anonymize": "redact",
+        "purge": "purge", "delete": "purge",
+    }
     if "pii_anonymization" in incoming:
-        settings.retention_mode = "anonymize" if incoming["pii_anonymization"] else "delete"
+        settings.retention_mode = "redact" if incoming["pii_anonymization"] else "purge"
         applied["retention_mode"] = settings.retention_mode
-    if incoming.get("retention_mode") in ("anonymize", "delete"):
-        settings.retention_mode = incoming["retention_mode"]
+    if incoming.get("retention_mode") in _MODES:
+        settings.retention_mode = _MODES[incoming["retention_mode"]]
         applied["retention_mode"] = settings.retention_mode
 
     # Record the full pushed policy — presence of a key marks it state-controlled.
