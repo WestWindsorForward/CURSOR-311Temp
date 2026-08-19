@@ -32,6 +32,7 @@ import PhotoUpload from '../components/PhotoUpload';
 import { filterPhoneInput, isValidPhone } from '../utils/phone';
 import RedirectNotice, { RedirectContact } from '../components/RedirectNotice';
 import TrackRequests from '../components/TrackRequests';
+import PlatformFeedback from '../components/PlatformFeedback';
 import LanguageSelector from '../components/LanguageSelector';
 import StaffDashboardMap from '../components/StaffDashboardMap';
 import { useSettings } from '../context/SettingsContext';
@@ -1399,6 +1400,18 @@ export default function ResidentPortal() {
                             })}
                         </div>
                     )}
+
+                    {/* Optional platform-feedback question.
+                        In the footer, collapsed to one line, and deliberately
+                        NOT a modal: a prompt that interrupts somebody filing a
+                        report competes with the job they came to do. Renders
+                        nothing at all unless the town enabled the module — the
+                        component returns null, and the endpoint behind it 404s
+                        regardless. */}
+                    <PlatformFeedback
+                        enabled={settings?.modules?.platform_feedback}
+                        feedbackEmail={settings?.platform_feedback_email}
+                    />
 
                     {/* Legal Links */}
                     <div className="flex items-center justify-center flex-wrap gap-x-4 gap-y-2 text-sm">

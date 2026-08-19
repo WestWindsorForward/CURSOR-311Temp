@@ -166,8 +166,39 @@ def test_the_migration_is_additive_and_defaults_the_column_off():
 def test_min_db_revision_stays_at_the_previous_head():
     """The expand case of the contract documented in backend/MIN_DB_REVISION: an
     additive migration leaves the floor at the revision before head, because this
-    build still starts against the un-migrated schema."""
-    text = Path(__file__).resolve().parents[1].joinpath("MIN_DB_REVISION").read_text()
-    declared = [ln.strip() for ln in text.splitlines()
+    build still starts against the un-migrated schema.
+
+    Asserted as the rule rather than as a frozen string. This used to read
+    `assert declared == ["e5a3c7b9d1f4"]`, which is the right answer only until
+    the next additive migration lands -- at which point the test fails for the
+    author who followed the contract correctly, and the obvious way to make it
+    pass again is to edit the literal, which is exactly the habit that let the
+    floor sit fourteen revisions stale once already.
+    """
+    import re
+
+    backend = Path(__file__).resolve().parents[1]
+    declared = [ln.strip() for ln in backend.joinpath("MIN_DB_REVISION").read_text().splitlines()
                 if ln.strip() and not ln.strip().startswith("#")]
-    assert declared == ["e5a3c7b9d1f4"]
+    assert len(declared) == 1, declared
+
+    chain = {}
+    for path in backend.glob("alembic/versions/*.py"):
+        source = path.read_text()
+        rev = re.search(r"^revision(?::\s*str)?\s*=\s*['\"](\w+)['\"]", source, re.M)
+        # A merge revision names two parents as a tuple, so every quoted
+        # identifier on the line counts -- taking only the first left the other
+        # branch looking like a second head.
+        down = re.search(r"^down_revision(?::[^=]+)?=\s*(.+)$", source, re.M)
+        if rev:
+            chain[rev.group(1)] = re.findall(r"['\"](\w+)['\"]", down.group(1)) if down else []
+    parents = {d for downs in chain.values() for d in downs}
+    heads = [r for r in chain if r not in parents]
+    assert len(heads) == 1, f"the revision chain has forked: {heads}"
+
+    assert declared == chain[heads[0]], (
+        f"MIN_DB_REVISION is {declared[0]}, but the revision before head "
+        f"({heads[0]}) is {chain[heads[0]]}. If the newest migration is "
+        f"DESTRUCTIVE the floor should be the head itself, and this test needs "
+        f"the exception written into it rather than the number quietly changed."
+    )

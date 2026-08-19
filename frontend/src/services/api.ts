@@ -1160,6 +1160,23 @@ class ApiClient {
         });
     }
 
+    /** Record one anonymous answer to the platform-feedback question.
+     *
+     *  Sends the chosen option and nothing else — no id, no report reference,
+     *  no session. The server 404s this when the module is off. */
+    async submitPlatformFeedback(platformExperience: string): Promise<{ status: string }> {
+        return this.request('/feedback/platform', {
+            method: 'POST',
+            body: JSON.stringify({ platform_experience: platformExperience }),
+        });
+    }
+
+    /** Aggregate platform feedback for the statistics page. Staff only, and
+     *  404s when the module is off. */
+    async getPlatformFeedbackStatistics(): Promise<import('../types').PlatformFeedbackStatistics> {
+        return this.request('/feedback/platform/statistics');
+    }
+
     /** Redirect counts for the statistics page. */
     async getRedirectedStatistics(days = 30): Promise<{
         days: number;

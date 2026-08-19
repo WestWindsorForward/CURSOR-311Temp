@@ -104,6 +104,16 @@ NEVER = {
     # report into a system the retention policy cannot reach -- the scrub
     # clears these columns here and would leave the vendor's copy untouched.
     "ai_analysis", "ai_summary", "ai_classification", "ai_analyzed_at",
+    # The optional platform-feedback module. These are not ServiceRequest
+    # columns -- they live on `platform_feedback` and on `system_settings` --
+    # and they are listed here anyway, because "the payload builder happens not
+    # to read that table" is an accident and this list is a decision.
+    #
+    # A resident's opinion of Pinpoint is not part of a work order, and
+    # aggregate sentiment about a vendor is not something to hand that vendor.
+    # `platform_feedback_email` is a town's support mailbox, which has no
+    # business in a county system either.
+    "platform_experience", "submitted_at", "platform_feedback_email",
 }
 
 
@@ -143,6 +153,21 @@ def test_every_column_is_either_sent_or_deliberately_not():
         f"new ServiceRequest columns nobody has ruled on: {sorted(unaccounted)}. "
         f"Add each to REQUIRED (and to the payload) or to NEVER."
     )
+
+
+def test_the_work_order_has_never_heard_of_platform_feedback():
+    """Stronger than the NEVER list, which only checks payload keys.
+
+    The platform-feedback table must not be read, joined or imported anywhere in
+    the outbound integration path at all -- there is no version of "a bit of it
+    goes to Accela" that is correct.
+    """
+    source = TASKS.read_text()
+    for token in ("PlatformFeedback", "platform_feedback", "platform_experience"):
+        assert token not in source, (
+            f"{token} appears in the govtech push path. Feedback about Pinpoint "
+            f"is not work-order data."
+        )
 
 
 def test_attachments_are_links_and_never_inline_blobs():

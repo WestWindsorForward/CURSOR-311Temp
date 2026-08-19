@@ -313,7 +313,16 @@ export interface SystemSettings {
     modules: {
         research_portal?: boolean;
         unlisted_reports?: boolean;
+        /** The optional one-question platform-feedback module. Off unless the
+         *  town says otherwise; the server 404s the endpoints when it is off,
+         *  so this flag only decides whether the UI is drawn. */
+        platform_feedback?: boolean;
     };
+    /** Where "want to tell us more?" points when platform_feedback is on.
+     *  null/'' means no such line is rendered — a dead mailto is worse than
+     *  no offer. Longer feedback goes to a mailbox rather than into the town's
+     *  database on purpose; see components/PlatformFeedback.tsx. */
+    platform_feedback_email?: string | null;
     /* Per-pack research export switches: {pack_id: bool}. An absent key means
      * the pack's own server-side default (analytical packs on; sentiment and
      * moderation off). Enforced at row build on the server — this is display
@@ -470,6 +479,23 @@ export interface AdvancedStatistics {
 
     // Cache info
     cached_at: string | null;
+}
+
+/** Aggregate answers to the platform-feedback question. Counts, never rows —
+ *  there are no individual records to show, by design.
+ *
+ *  No mean: the five options are ordered but not evenly spaced, so averaging
+ *  them would invent a measurement. `net_easier_percent` (share saying easier
+ *  minus share saying harder) is the honest single number.
+ *
+ *  `responses_by_month` uses the same "YYYY-MM" keys as
+ *  AdvancedStatistics.requests_by_month so it renders like the other trends. */
+export interface PlatformFeedbackStatistics {
+    total_responses: number;
+    counts: Record<string, number>;
+    percentages: Record<string, number>;
+    net_easier_percent: number;
+    responses_by_month: Record<string, number>;
 }
 
 // Auth types

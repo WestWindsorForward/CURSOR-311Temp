@@ -50,7 +50,7 @@ if SENTRY_DSN:
         before_send=_crash_reporting_wanted,
     )
 
-from app.api import auth, users, departments, services, system, open311, gis, map_layers, comments, research, health, audit, setup, api_usage, data_export, integrations, provisioning, telemetry, roads
+from app.api import auth, users, departments, services, system, open311, gis, map_layers, comments, research, health, audit, setup, api_usage, data_export, integrations, provisioning, telemetry, roads, feedback
 from app.db.init_db import seed_database
 
 # Rate limiting setup
@@ -551,6 +551,10 @@ app.include_router(api_usage.router, prefix="/api/system/api-usage", tags=["API 
 # table, not the mount line, is the fact to check.
 app.include_router(data_export.router, prefix="/api", tags=["Data Export"])
 app.include_router(integrations.router, prefix="/api/integrations", tags=["GovTech Integrations"])
+# Optional module, off by default. The router is always mounted; every route
+# on it checks system_settings.modules.platform_feedback and 404s when the
+# town has not enabled it, so mounting it costs a disabled town nothing.
+app.include_router(feedback.router, prefix="/api/feedback", tags=["Platform Feedback"])
 
 # Mount uploads directory for serving uploaded files
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/project/uploads")
