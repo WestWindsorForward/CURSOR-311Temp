@@ -2,6 +2,8 @@ from app.core.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models import ServiceRequest
 from app.services.notifications import notification_service
+from app.services import email_layout as L
+from app.services.town_time import format_town
 from sqlalchemy import select
 import asyncio
 import os
@@ -700,6 +702,8 @@ def send_department_notification(request_id: int, department_email: str = None):
             sms_enabled_globally = await capability_switches.enabled("sms")
             
             township_name = settings.township_name if settings else "Your Township"
+            logo_url = settings.logo_url if settings else None
+            primary_color = settings.primary_color if settings else "#6366f1"
             custom_domain = settings.custom_domain if settings else None
             if not custom_domain:
                 custom_domain = os.environ.get('DOMAIN', '')
@@ -778,40 +782,41 @@ def send_department_notification(request_id: int, department_email: str = None):
                         continue
                     
                     # Build notification content
-                    subject = f"📋 New Request: {request.service_name}"
+                    subject = f"New request: {request.service_name}"
                     staff_link = f"{portal_url}/staff#request/{request.service_request_id}"
-                    
-                    body_html = f"""
-                    <html>
-                    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-                        <div style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: white; padding: 24px; border-radius: 12px 12px 0 0;">
-                            <h2 style="margin: 0;">📋 New Request Assigned</h2>
-                            <p style="margin: 8px 0 0 0; opacity: 0.9;">{township_name} 311</p>
-                        </div>
-                        <div style="background: #f8fafc; padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 12px 12px;">
-                            <p style="margin: 0 0 16px 0;"><strong>Hi {staff.full_name or staff.username},</strong></p>
-                            <p style="margin: 0 0 16px 0;">A new service request has been submitted to your department:</p>
-                            
-                            <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 16px;">
-                                <p style="margin: 0 0 8px 0;"><strong>Request ID:</strong> {request.service_request_id}</p>
-                                <p style="margin: 0 0 8px 0;"><strong>Category:</strong> {request.service_name}</p>
-                                <p style="margin: 0 0 8px 0;"><strong>Address:</strong> {request.address or 'Not provided'}</p>
-                                <p style="margin: 0;"><strong>Description:</strong></p>
-                                <p style="margin: 8px 0 0 0; color: #475569;">{request.description[:200]}{'...' if len(request.description or '') > 200 else ''}</p>
-                            </div>
-                            
-                            <a href="{staff_link}" style="display: inline-block; background: #6366f1; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 500;">View Request →</a>
-                        </div>
-                    </body>
-                    </html>
-                    """
-                    
+
+                    message = L.build_email(
+                        subject=subject,
+                        township_name=township_name,
+                        logo_url=logo_url,
+                        primary_color=primary_color,
+                        preheader=f"{request.service_request_id} - {request.service_name}",
+                        # No greeting and no "a new service request has been
+                        # submitted to your department": the heading says that,
+                        # and a line that restates the heading is a line the
+                        # reader has to skip before reaching the address.
+                        blocks=[
+                            L.heading("New request assigned", 2),
+                            L.fields([
+                                ("Request ID", request.service_request_id),
+                                ("Category", request.service_name),
+                                ("Address", request.address or "Not provided"),
+                                ("Description", (request.description or "")[:200]),
+                            ]),
+                            L.button("View request in the staff dashboard", staff_link),
+                        ],
+                        footer_lines=[
+                            f"You're receiving this because you're staff at {township_name}.",
+                        ],
+                    )
+
                     # Send email if enabled
                     if send_email and staff.email:
                         notification_service.send_email(
                             to=staff.email,
-                            subject=subject,
-                            body_html=body_html,
+                            subject=message["subject"],
+                            body_html=message["html"],
+                            body_text=message["text"],
                             from_name=f"{township_name} 311"
                         )
                         notified_staff.append({"email": staff.email, "type": "email"})
@@ -819,37 +824,50 @@ def send_department_notification(request_id: int, department_email: str = None):
                     # Send SMS if enabled globally and by user preference
                     if send_sms and staff.phone:
                         short_desc = (request.description or "")[:50]
-                        sms_message = f"""📋 {township_name} 311
-New Request: {request.service_name}
+                        sms_message = f"""{township_name} 311
+New request: {request.service_name}
 "{short_desc}..."
-📍 {request.address or 'No address'}
+{request.address or 'No address'}
 
-🔗 {staff_link}"""
+{staff_link}"""
                         await notification_service.send_sms(staff.phone, sms_message)
                         notified_staff.append({"phone": staff.phone, "type": "sms"})
             
             # Also send to department email as fallback/archive
             if department_email and not notified_staff:
-                subject = f"New Service Request: #{request.service_request_id} - {request.service_name}"
-                body_html = f"""
-                <html>
-                <body style="font-family: Arial, sans-serif;">
-                    <h2>New Service Request Received</h2>
-                    <p><strong>Request ID:</strong> {request.service_request_id}</p>
-                    <p><strong>Category:</strong> {request.service_name}</p>
-                    <p><strong>Description:</strong></p>
-                    <p>{request.description}</p>
-                    <p><strong>Address:</strong> {request.address or 'Not provided'}</p>
-                    <p><strong>Submitted:</strong> {request.requested_datetime}</p>
-                    <hr>
-                    <p>Please log in to the staff dashboard to manage this request.</p>
-                </body>
-                </html>
-                """
+                subject = f"New service request: #{request.service_request_id} - {request.service_name}"
+                message = L.build_email(
+                    subject=subject,
+                    township_name=township_name,
+                    logo_url=logo_url,
+                    primary_color=primary_color,
+                    preheader=f"{request.service_request_id} - {request.service_name}",
+                    blocks=[
+                        L.heading("New service request received", 2),
+                        L.fields([
+                            ("Request ID", request.service_request_id),
+                            ("Category", request.service_name),
+                            ("Description", request.description or ""),
+                            ("Address", request.address or "Not provided"),
+                            # The town's wall clock, not the stored UTC. A raw
+                            # `2026-08-18 02:14:00+00:00` in a field list is
+                            # both unreadable and, for a clerk in New Jersey,
+                            # the wrong evening.
+                            ("Submitted", format_town(
+                                request.requested_datetime,
+                                getattr(settings, "timezone", None))),
+                        ]),
+                        L.button("Open the staff dashboard", f"{portal_url}/staff"),
+                    ],
+                    footer_lines=[
+                        f"This address is the routing address for a department at {township_name}.",
+                    ],
+                )
                 notification_service.send_email(
                     to=department_email,
-                    subject=subject,
-                    body_html=body_html,
+                    subject=message["subject"],
+                    body_html=message["html"],
+                    body_text=message["text"],
                     from_name=f"{township_name} 311"
                 )
                 notified_staff.append({"email": department_email, "type": "fallback"})
@@ -890,6 +908,8 @@ def notify_staff_of_activity(request_id: int, event: str, actor: str = None):
             from app.services import capability_switches
             sms_enabled_globally = await capability_switches.enabled("sms")
             township_name = settings.township_name if settings else "Your Township"
+            logo_url = settings.logo_url if settings else None
+            primary_color = settings.primary_color if settings else "#6366f1"
             custom_domain = (settings.custom_domain if settings else None) or os.environ.get('DOMAIN', '')
             portal_url = f"https://{custom_domain}" if custom_domain and custom_domain != 'localhost' else "http://localhost:5173"
 
@@ -995,26 +1015,32 @@ def notify_staff_of_activity(request_id: int, event: str, actor: str = None):
                 )
 
                 if send_email and staff.email:
-                    body_html = f"""
-                    <html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-                        <div style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: white; padding: 20px; border-radius: 12px 12px 0 0;">
-                            <h2 style="margin: 0;">{label}</h2>
-                            <p style="margin: 6px 0 0 0; opacity: 0.9;">{township_name} 311</p>
-                        </div>
-                        <div style="background: #f8fafc; padding: 20px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 12px 12px;">
-                            <p style="margin: 0 0 12px 0;"><strong>Hi {staff.full_name or staff.username},</strong></p>
-                            <p style="margin: 0 0 12px 0;">{label.lower()} on a request in your department:</p>
-                            <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; margin-bottom: 14px;">
-                                <p style="margin: 0 0 6px 0;"><strong>Request:</strong> {request.service_request_id} — {request.service_name}</p>
-                                <p style="margin: 0 0 6px 0;"><strong>Status:</strong> {status_text}</p>
-                                <p style="margin: 0;"><strong>Address:</strong> {request.address or 'Not provided'}</p>
-                            </div>
-                            <a href="{staff_link}" style="display: inline-block; background: #6366f1; color: white; text-decoration: none; padding: 10px 22px; border-radius: 8px; font-weight: 500;">View Request →</a>
-                        </div>
-                    </body></html>
-                    """
+                    message = L.build_email(
+                        subject=subject,
+                        township_name=township_name,
+                        logo_url=logo_url,
+                        primary_color=primary_color,
+                        preheader=f"{label} - {request.service_request_id}",
+                        # The greeting carried nothing, and the sentence under
+                        # it was the heading lower-cased with four words after
+                        # it -- a fragment assembled in English word order that
+                        # said no more than the heading already had.
+                        blocks=[
+                            L.heading(label, 2),
+                            L.fields([
+                                ("Request", f"{request.service_request_id} - {request.service_name}"),
+                                ("Status", status_text),
+                                ("Address", request.address or "Not provided"),
+                            ]),
+                            L.button("View request in the staff dashboard", staff_link),
+                        ],
+                        footer_lines=[
+                            f"You're receiving this because you're staff at {township_name}.",
+                        ],
+                    )
                     notification_service.send_email(
-                        to=staff.email, subject=subject, body_html=body_html,
+                        to=staff.email, subject=message["subject"],
+                        body_html=message["html"], body_text=message["text"],
                         from_name=f"{township_name} 311"
                     )
                     notified.append(staff.email)
@@ -1022,7 +1048,7 @@ def notify_staff_of_activity(request_id: int, event: str, actor: str = None):
                 if send_sms and staff.phone:
                     await notification_service.send_sms(
                         staff.phone,
-                        f"{township_name} 311 — {label} on {request.service_request_id}: {status_text}\n🔗 {staff_link}"
+                        f"{township_name} 311 — {label} on {request.service_request_id}: {status_text}\n{staff_link}"
                     )
                     notified.append(staff.phone)
 
@@ -1373,10 +1399,17 @@ def send_weekly_digest():
                         func.count(ServiceRequest.id).label('total'),
                         func.sum(case((ServiceRequest.status == 'open', 1), else_=0)).label('open_count'),
                         func.sum(case((ServiceRequest.status == 'in_progress', 1), else_=0)).label('in_progress'),
+                        # Deliberately not called "overdue". Seven days is a
+                        # threshold written here and nowhere else -- no town
+                        # configured it, and it has no relation to the opt-in
+                        # per-category `sla_hours` that is the only deadline
+                        # this system actually knows about. Counting requests
+                        # by age is a fact; calling them late is a judgement
+                        # made on the town's behalf that nobody agreed to.
                         func.sum(case((and_(
                             ServiceRequest.status.in_(['open', 'in_progress']),
                             ServiceRequest.requested_datetime < datetime.now(timezone.utc) - timedelta(days=7)
-                        ), 1), else_=0)).label('overdue')
+                        ), 1), else_=0)).label('open_over_7_days')
                     ).where(
                         and_(
                             ServiceRequest.deleted_at.is_(None),
@@ -1388,10 +1421,17 @@ def send_weekly_digest():
                         func.count(ServiceRequest.id).label('total'),
                         func.sum(case((ServiceRequest.status == 'open', 1), else_=0)).label('open_count'),
                         func.sum(case((ServiceRequest.status == 'in_progress', 1), else_=0)).label('in_progress'),
+                        # Deliberately not called "overdue". Seven days is a
+                        # threshold written here and nowhere else -- no town
+                        # configured it, and it has no relation to the opt-in
+                        # per-category `sla_hours` that is the only deadline
+                        # this system actually knows about. Counting requests
+                        # by age is a fact; calling them late is a judgement
+                        # made on the town's behalf that nobody agreed to.
                         func.sum(case((and_(
                             ServiceRequest.status.in_(['open', 'in_progress']),
                             ServiceRequest.requested_datetime < datetime.now(timezone.utc) - timedelta(days=7)
-                        ), 1), else_=0)).label('overdue')
+                        ), 1), else_=0)).label('open_over_7_days')
                     ).where(
                         and_(
                             ServiceRequest.deleted_at.is_(None),
@@ -1406,7 +1446,7 @@ def send_weekly_digest():
                 total = stats.total or 0
                 open_count = int(stats.open_count or 0)
                 in_progress = int(stats.in_progress or 0)
-                overdue = int(stats.overdue or 0)
+                open_over_7_days = int(stats.open_over_7_days or 0)
                 
                 # Skip if no open requests
                 if total == 0:
@@ -1427,88 +1467,54 @@ def send_weekly_digest():
                 oldest_result = await db.execute(oldest_query)
                 oldest_requests = oldest_result.scalars().all()
                 
-                # Build request list HTML
-                requests_html = ""
+                # The oldest open requests, as rows of a real table -- the
+                # digest's old three-column "flex" summary was the clearest
+                # example of the whole problem: it stacked into a single
+                # unreadable column in Outlook, because Word has no flexbox.
+                rows = []
                 for req in oldest_requests:
                     age_days = (datetime.now(timezone.utc) - req.requested_datetime).days if req.requested_datetime else 0
                     age_str = f"{age_days}d" if age_days > 0 else "Today"
-                    status_color = "#22c55e" if req.status == "in_progress" else "#f59e0b"
-                    requests_html += f"""
-                    <tr>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">
-                            <a href="{portal_url}/staff#request/{req.service_request_id}" style="color: #6366f1; text-decoration: none; font-weight: 500;">{req.service_request_id}</a>
-                        </td>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">{req.service_name}</td>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">
-                            <span style="background: {status_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px;">{req.status}</span>
-                        </td>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">{age_str}</td>
-                    </tr>
-                    """
-                
-                # Build digest email
-                subject = f"📊 Weekly Digest: {total} Open Requests - {township_name} 311"
-                body_html = f"""
-                <html>
-                <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f1f5f9;">
-                    <div style="background: linear-gradient(135deg, {primary_color} 0%, #8b5cf6 100%); color: white; padding: 24px; border-radius: 12px 12px 0 0;">
-                        {"<img src='" + logo_url + "' style='height: 40px; margin-bottom: 12px;' />" if logo_url else ""}
-                        <h2 style="margin: 0;">📊 Weekly Digest</h2>
-                        <p style="margin: 8px 0 0 0; opacity: 0.9;">{township_name} 311 System</p>
-                    </div>
-                    
-                    <div style="background: white; padding: 24px; border: 1px solid #e2e8f0; border-top: none;">
-                        <p style="margin: 0 0 16px 0;">Hi <strong>{staff.full_name or staff.username}</strong>,</p>
-                        <p style="margin: 0 0 24px 0;">Here's your weekly summary of open service requests:</p>
-                        
-                        <div style="display: flex; gap: 12px; margin-bottom: 24px;">
-                            <div style="flex: 1; background: #fef3c7; padding: 16px; border-radius: 8px; text-align: center;">
-                                <p style="margin: 0; font-size: 24px; font-weight: bold; color: #d97706;">{open_count}</p>
-                                <p style="margin: 4px 0 0 0; font-size: 12px; color: #92400e;">Open</p>
-                            </div>
-                            <div style="flex: 1; background: #dbeafe; padding: 16px; border-radius: 8px; text-align: center;">
-                                <p style="margin: 0; font-size: 24px; font-weight: bold; color: #2563eb;">{in_progress}</p>
-                                <p style="margin: 4px 0 0 0; font-size: 12px; color: #1e40af;">In Progress</p>
-                            </div>
-                            <div style="flex: 1; background: #fee2e2; padding: 16px; border-radius: 8px; text-align: center;">
-                                <p style="margin: 0; font-size: 24px; font-weight: bold; color: #dc2626;">{overdue}</p>
-                                <p style="margin: 4px 0 0 0; font-size: 12px; color: #991b1b;">Overdue (7+ days)</p>
-                            </div>
-                        </div>
-                        
-                        <h3 style="margin: 0 0 12px 0; color: #1e293b;">📋 Oldest Open Requests</h3>
-                        <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
-                            <thead>
-                                <tr style="background: #f8fafc;">
-                                    <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e2e8f0;">ID</th>
-                                    <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e2e8f0;">Category</th>
-                                    <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e2e8f0;">Status</th>
-                                    <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e2e8f0;">Age</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {requests_html}
-                            </tbody>
-                        </table>
-                        
-                        <a href="{portal_url}/staff" style="display: inline-block; background: {primary_color}; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 500;">View All Requests →</a>
-                    </div>
-                    
-                    <div style="background: #f8fafc; padding: 16px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 12px 12px; text-align: center;">
-                        <p style="margin: 0; font-size: 12px; color: #64748b;">
-                            You're receiving this because you're staff at {township_name}.<br>
-                            <a href="{portal_url}/staff/settings" style="color: #6366f1;">Manage notification preferences</a>
-                        </p>
-                    </div>
-                </body>
-                </html>
-                """
-                
+                    rows.append([
+                        req.service_request_id,
+                        req.service_name,
+                        str(getattr(req.status, "value", req.status) or "").replace("_", " "),
+                        age_str,
+                    ])
+
+                subject = f"Weekly digest: {total} open requests - {township_name} 311"
+                message = L.build_email(
+                    subject=subject,
+                    township_name=township_name,
+                    logo_url=logo_url,
+                    primary_color=primary_color,
+                    preheader=(f"{open_count} open, {in_progress} in progress, "
+                               f"{open_over_7_days} open over 7 days"),
+                    blocks=[
+                        L.heading("Weekly digest", 2),
+                        L.stats([
+                            ("Open", open_count),
+                            ("In progress", in_progress),
+                            ("Open 7+ days", open_over_7_days),
+                        ]),
+                        L.heading("Oldest open requests", 3),
+                        L.table(["ID", "Category", "Status", "Age"], rows) if rows
+                        else L.paragraph("Nothing has been waiting -- the queue is clear."),
+                        L.button("View all requests", f"{portal_url}/staff"),
+                    ],
+                    footer_lines=[
+                        f"You're receiving this because you're staff at {township_name}.",
+                        f"Manage notification preferences: {portal_url}/staff/settings",
+                    ],
+                )
+
                 # Send email
                 notification_service.send_email(
                     to=staff.email,
-                    subject=subject,
-                    body_html=body_html
+                    subject=message["subject"],
+                    body_html=message["html"],
+                    body_text=message["text"],
+                    from_name=f"{township_name} 311",
                 )
                 sent_count += 1
                 logger.info(f"[Weekly Digest] Sent to {staff.email}")
@@ -1670,30 +1676,41 @@ def proactive_health_scan():
             township = settings.township_name or "Your 311"
             crit = [c for c in escalations if c["status"] == "critical"]
             worst = "Critical" if crit else "Warning"
-            rows = "".join(
-                f"<tr><td style='padding:6px 10px;border-bottom:1px solid #e2e8f0;'><strong>{c['label']}</strong></td>"
-                f"<td style='padding:6px 10px;border-bottom:1px solid #e2e8f0;color:{'#dc2626' if c['status']=='critical' else '#d97706'};text-transform:uppercase;font-size:12px;'>{c['status']}</td>"
-                f"<td style='padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#475569;'>{c['message']}<br><span style='color:#64748b;font-size:12px;'>{c['action']}</span></td></tr>"
-                for c in escalations
+            # One callout per check rather than a colour-coded table row. The
+            # severity is the callout's title -- the word "Critical", not a red
+            # cell -- because an administrator reading this on a phone in dark
+            # mode, or with a screen reader, has to get the same answer.
+            blocks = [
+                L.heading(f"{worst}: system needs attention", 2),
+                L.paragraph("Each check below has crossed its alert threshold. "
+                            "The condition observed and the action for it are "
+                            "stated on each one."),
+            ]
+            for c in escalations:
+                tone = "critical" if c["status"] == "critical" else "warning"
+                blocks.append(L.callout(
+                    f"{c['message']} {c['action']}",
+                    tone,
+                    title=f"{c['status'].upper()} - {c['label']}",
+                ))
+            blocks.append(L.paragraph(
+                "Full detail, and the restart and maintenance actions, are in "
+                "Admin Console under System Health.", muted=True))
+            subject = f"[{worst}] {township} - {len(escalations)} system check(s) need attention"
+            message = L.build_email(
+                subject=subject,
+                township_name=township,
+                logo_url=settings.logo_url,
+                primary_color=settings.primary_color or "#6366f1",
+                preheader=", ".join(c["label"] for c in escalations)[:120],
+                blocks=blocks,
+                footer_lines=["Proactive health alert. Sent to administrators only."],
             )
-            body_html = f"""
-            <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:640px;margin:0 auto;padding:20px;">
-                <div style="background:linear-gradient(135deg,#f59e0b,#dc2626);color:white;padding:20px;border-radius:12px 12px 0 0;">
-                    <h2 style="margin:0;">{worst}: system needs attention</h2>
-                    <p style="margin:6px 0 0 0;opacity:.9;">{township} — proactive health alert</p>
-                </div>
-                <div style="background:#f8fafc;padding:20px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
-                    <p style="margin:0 0 12px 0;">These leading indicators just crossed a threshold. Acting now can prevent an outage:</p>
-                    <table style="width:100%;border-collapse:collapse;background:white;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">{rows}</table>
-                    <p style="margin:14px 0 0 0;color:#64748b;font-size:13px;">See Admin Console → System Health for details and one-click restart/maintenance actions.</p>
-                </div>
-            </body></html>
-            """
-            subject = f"[{worst}] {township} — {len(escalations)} system check(s) need attention"
             for admin in admins:
                 try:
                     notification_service.send_email(
-                        to=admin.email, subject=subject, body_html=body_html,
+                        to=admin.email, subject=message["subject"],
+                        body_html=message["html"], body_text=message["text"],
                         from_name=f"{township} System Monitor",
                     )
                 except Exception as e:

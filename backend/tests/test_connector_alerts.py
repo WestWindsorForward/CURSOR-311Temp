@@ -260,13 +260,19 @@ def test_a_provider_error_cannot_inject_markup_into_the_email():
 
 
 def test_broken_and_at_risk_are_separate_headings():
-    """Filing "may stop working" under "not working" is the same class of lie
-    as a green tick on a revoked key."""
+    """Filing "failing intermittently" under "not working" is the same class of
+    lie as a green tick on a revoked key.
+
+    The at-risk heading used to read "May stop working", which predicted an
+    outcome the sweep has no basis for while telling the reader nothing to act
+    on. It states the observed condition now.
+    """
     plan = A.plan([FakeHealth("sms", "failing"), FakeHealth("identity", "down")], now=NOW)
     text = A.compose(plan, town="T", now=NOW)["text"]
     assert "Not working right now:" in text
-    assert "May stop working:" in text
-    assert text.index("Not working right now:") < text.index("May stop working:")
+    assert "Failing intermittently:" in text
+    assert "may stop" not in text.lower()
+    assert text.index("Not working right now:") < text.index("Failing intermittently:")
 
 
 # ---------------------------------------------------------------------------

@@ -521,10 +521,24 @@ class NotificationService:
         body_text: Optional[str] = None,
         from_name: Optional[str] = None
     ) -> bool:
-        """Send email notification. Optionally override sender name for branded emails."""
+        """Send email notification. Optionally override sender name for branded emails.
+
+        The text alternative is guaranteed here rather than trusted from the
+        caller. All three providers below accept one -- SMTP as a second MIME
+        part, SES as `Body.Text`, ACS as `content.plainText` -- and none of them
+        invents one, so a caller that forgot sent an HTML-only message. That
+        costs deliverability with every spam filter and leaves a text-only
+        client, a smartwatch preview and a screen reader with nothing to read.
+        Recovering the text from rendered HTML is worse than composing it from
+        the content, which is why `email_layout.build_email` does the latter;
+        this is the floor, not the plan.
+        """
         if not self._email_provider:
             logger.warning("Email provider not configured")
             return False
+        if not (body_text or "").strip():
+            from app.services.email_layout import html_to_text
+            body_text = html_to_text(body_html)
         success = self._email_provider.send_email(to, subject, body_html, body_text, from_name=from_name)
         self._record_health_sync("email", success)
 
@@ -633,28 +647,27 @@ class NotificationService:
     
     def send_request_confirmation(self, request_id: str, email: str, phone: Optional[str] = None):
         """Legacy confirmation - now calls branded version with defaults"""
-        # This is a fallback for legacy calls - will use basic template
-        subject = f"Request #{request_id} Received"
-        body_html = f"""
-        <html>
-        <body style="font-family: Arial, sans-serif; color: #333;">
-            <h2>Your Request Has Been Received</h2>
-            <p>Thank you for submitting a service request to your local township.</p>
-            <p><strong>Request ID:</strong> {request_id}</p>
-            <p>You can track the status of your request using this ID.</p>
-            <p>We appreciate your help in making our community better!</p>
-            <hr>
-            <p style="color: #666; font-size: 12px;">
-                This is an automated message. Please do not reply directly to this email.
-            </p>
-        </body>
-        </html>
-        """
-        body_text = f"Your service request #{request_id} has been received. Thank you!"
-        
-        # Send email
+        # A fallback for legacy call sites that have no branding to hand. It
+        # still goes through the one shared layout, so it is the same email in
+        # a plainer suit rather than a second design.
+        from app.services import email_layout as L
+
+        message = L.build_email(
+            subject=f"Request #{request_id} received",
+            township_name="311",
+            blocks=[
+                # "Thank you for submitting a service request to your local
+                # township" restated the heading directly above it and has
+                # gone; the line that tells the reader what the number is for
+                # has stayed, because it is the only instruction here.
+                L.heading("Your request has been received", 2),
+                L.fields([("Request ID", f"#{request_id}")]),
+                L.paragraph("You can track the status of your request using this ID."),
+            ],
+            footer_lines=["We appreciate your help in making our community better."],
+        )
         if email:
-            self.send_email(email, subject, body_html, body_text)
+            self.send_email(email, message["subject"], message["html"], message["text"])
     
     async def send_status_update_branded(
         self,
@@ -718,20 +731,21 @@ class NotificationService:
             "closed": "has been resolved"
         }.get(new_status, f"status changed to {new_status}")
         
-        subject = f"Request #{request_id} Status Update"
-        body_html = f"""
-        <html>
-        <body style="font-family: Arial, sans-serif; color: #333;">
-            <h2>Request Status Update</h2>
-            <p>Your service request <strong>#{request_id}</strong> {status_text}.</p>
-            <p>Thank you for your patience!</p>
-        </body>
-        </html>
-        """
+        from app.services import email_layout as L
+
+        message = L.build_email(
+            subject=f"Request #{request_id} status update",
+            township_name="311",
+            blocks=[
+                L.heading("Request status update", 2),
+                L.paragraph(f"Your service request #{request_id} {status_text}."),
+            ],
+            footer_lines=["Thank you for your patience."],
+        )
         sms_message = f"Request #{request_id} {status_text}"
-        
+
         if email:
-            self.send_email(email, subject, body_html)
+            self.send_email(email, message["subject"], message["html"], message["text"])
         
         if phone:
             await self.send_sms(phone, sms_message)

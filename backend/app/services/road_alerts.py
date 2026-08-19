@@ -138,10 +138,10 @@ def build_alerts(
             body=(
                 f"These roads are used by jurisdiction rules but are no longer in the "
                 f"road data: {listed}.\n\n"
-                "Reports on them will be handled by the town instead of being redirected, "
-                "and nothing will look wrong until somebody notices. The road may have "
-                "been renamed by the data publisher -- check the spelling in Service "
-                "Categories -> Routing."
+                "Reports on them are now handled by the town instead of being "
+                "redirected, and the routing screens show no error. The usual cause is "
+                "a spelling change by the data publisher. Check the road names against "
+                "Service Categories -> Routing."
             ),
         ))
 
@@ -151,9 +151,10 @@ def build_alerts(
             subject=f"Road data for {township} has failed to update {consecutive_failures} times",
             body=(
                 f"The last error was: {last_error or 'unknown'}.\n\n"
-                "The existing road data is still being used, so routing continues to "
-                "work -- but it is getting older, and new streets will not be picked up. "
-                "The source endpoint may have moved."
+                "Routing still works, because the last successful copy of the road "
+                "data is still in use. That copy is not being refreshed, so streets "
+                "added or renamed since then are absent. Check that the source URL in "
+                "the road-data settings still resolves."
             ),
         ))
 
