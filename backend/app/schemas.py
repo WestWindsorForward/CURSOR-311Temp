@@ -326,6 +326,13 @@ class ServiceRequestDetailResponse(ServiceRequestResponse):
     email: str
     phone: Optional[str] = None
     media_urls: Optional[List[str]] = []  # Array of photo URLs
+    # Photos the redactor could not clear, awaiting a staff decision:
+    # [{"media": <data URI>, "reason": "provider-error"|...}].
+    #
+    # Only on the *detail* response, which is staff-only on every route that
+    # returns it. These are unredacted, which is exactly why they are held out
+    # of media_urls, so they must never reach a public schema.
+    media_pending_review: Optional[List[Dict[str, Any]]] = []
     ai_analysis: Optional[Dict[str, Any]] = None
     flag_reason: Optional[str] = None
     staff_notes: Optional[str] = None

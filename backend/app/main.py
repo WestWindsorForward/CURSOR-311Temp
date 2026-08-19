@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.body_limit import BodySizeLimitMiddleware, MAX_REQUEST_BODY_BYTES  # noqa: F401
 from contextlib import asynccontextmanager
 import os
 import logging
@@ -489,6 +490,9 @@ SwaggerUIBundle({
 # Rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Refuse an over-large body before any route, dependency or decorator sees it.
+app.add_middleware(BodySizeLimitMiddleware)
 
 # Security headers middleware (added first, runs last)
 app.add_middleware(SecurityHeadersMiddleware)

@@ -25,4 +25,11 @@
 # contract migrations (retire_hard_delete, drop_dead_documents_pushed_flag, the
 # NOT NULL on retention state) that this build genuinely cannot start against --
 # so the declared floor was claiming compatibility the image does not have.
-f6b4d8e2a3c5
+a8c6e2f4b9d1
+# Head is b8c4d2e6f0a1 (screen photos at pick time): a new table plus a nullable
+# column, purely additive, so the rule above puts this at the revision
+# immediately before it. It had once been left at c3d4e5f6a7b8 for fourteen
+# revisions, several of them contract migrations (retire_hard_delete,
+# drop_dead_documents_pushed_flag, the NOT NULL on retention state) that this
+# build genuinely cannot start against -- so the declared floor was claiming
+# compatibility the image does not have.

@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import { Button, Input, Textarea, Card } from '../components/ui';
 import LocationPicker from '../components/LocationPicker';
-import PhotoUpload from '../components/PhotoUpload';
+import PhotoUpload, { PhotoState, PhotoStatus } from '../components/PhotoUpload';
 import { filterPhoneInput, isValidPhone } from '../utils/phone';
 import RedirectNotice, { RedirectContact } from '../components/RedirectNotice';
 import TrackRequests from '../components/TrackRequests';
@@ -220,9 +220,41 @@ export default function ResidentPortal() {
     // Custom question answers
     const [customAnswers, setCustomAnswers] = useState<Record<string, string | string[]>>({});
 
-    // Photo upload state
-    const [photos, setPhotos] = useState<File[]>([]);
-    const [photoPreviewUrls, setPhotoPreviewUrls] = useState<string[]>([]);
+    /**
+     * Photos, and where each one has got to in screening.
+     *
+     * Screening -- moderation plus the face and plate blur -- used to happen
+     * inside the create-request POST, which put a Google Vision round trip on
+     * the Submit button: attach a 6MB photo and the form sat under a generic
+     * spinner long enough that residents pressed Submit twice. It happens here
+     * instead, the moment the photo is picked, while they are still writing the
+     * description. By the time they submit, the answer is already in.
+     *
+     * Each entry keeps three things that look redundant and are not:
+     *   previewUrl  what the resident sees. Swapped for the REDACTED image once
+     *               screening finishes, so the thumbnail is what the town will
+     *               actually publish rather than the original they chose.
+     *   original    the bytes as picked, in memory only, kept solely so a handle
+     *               that expires mid-form can fall back to the inline path.
+     *   handle      what goes into media_urls in place of megabytes of base64.
+     */
+    type AttachedPhoto = {
+        id: string;
+        previewUrl: string;
+        original: string;
+        state: PhotoState;
+        message?: string;
+        handle?: string;
+    };
+    const [attachedPhotos, setAttachedPhotos] = useState<AttachedPhoto[]>([]);
+    const photoPreviewUrls = attachedPhotos.map((p) => p.previewUrl);
+    const photoStatuses: PhotoStatus[] = attachedPhotos.map(
+        ({ state, message }) => ({ state, message }),
+    );
+    const blockedPhotos = attachedPhotos.filter((p) => p.state === 'blocked');
+    const photosStillChecking = attachedPhotos.some(
+        (p) => p.state === 'uploading' || p.state === 'checking',
+    );
 
     const [mapLayers, setMapLayers] = useState<MapLayer[]>([]);
     // Selected asset from map layer (for report logging)
@@ -404,6 +436,17 @@ export default function ResidentPortal() {
 
         if (!validateForm()) return;
 
+        // A photo the screen refused cannot be attached, and the resident was
+        // already told so at the thumbnail. Refusing here too means a client
+        // that ignores the pick-time answer gets the same one -- the server
+        // refuses it a third time, which is where it actually counts.
+        if (blockedPhotos.length) {
+            setFormErrors({
+                submit: "One of your photos can't be used. Please remove it and try again.",
+            });
+            return;
+        }
+
         setIsSubmitting(true);
         try {
             // Matched asset: ONLY use user-selected asset (no automatic proximity detection)
@@ -422,13 +465,22 @@ export default function ResidentPortal() {
             }
             // Note: No automatic proximity detection - user must explicitly select an asset
 
+            // A photo screened at pick time travels as its handle -- a short
+            // string instead of megabytes of base64, and no second Vision call.
+            // Anything the screen did not clear travels inline and takes the
+            // original at-submit path, which is also what an Open311 client or
+            // a connector does; nothing about that path changed.
+            const usable = attachedPhotos.filter((p) => p.state !== 'blocked').slice(0, 3);
+            const inlineFallback: Record<string, string> = {};
+            usable.forEach((p) => { if (p.handle) inlineFallback[p.handle] = p.original; });
+
             const result = await api.createRequest({
                 ...formData,
                 preferred_language: language,  // Capture user's selected language for notifications
-                media_urls: photoPreviewUrls.slice(0, 3),  // Include photos (max 3)
+                media_urls: usable.map((p) => p.handle || p.original),
                 matched_asset: matchedAsset,
                 custom_fields: customAnswers,
-            });
+            }, inlineFallback);
             setSubmittedId(result.service_request_id);
             // Save to localStorage so Track Requests can identify "your" submissions
             try {
@@ -463,8 +515,7 @@ export default function ResidentPortal() {
         });
         setFormErrors({});
         setSubmittedId(null);
-        setPhotos([]);
-        setPhotoPreviewUrls([]);
+        setAttachedPhotos([]);
         setLocation({ address: '', lat: null, lng: null });
         // Clear blocking state
         setIsBlocked(false);
@@ -476,23 +527,81 @@ export default function ResidentPortal() {
         window.history.replaceState(null, '', window.location.pathname);
     };
 
-    const handlePhotoUpload = (files: FileList) => {
-        const newPhotos = Array.from(files).slice(0, 3 - photos.length); // Max 3 photos
-        setPhotos((prev) => [...prev, ...newPhotos]);
+    /** Update one photo by identity rather than position.
+     *
+     * Positions move: a resident can remove the first photo while the third is
+     * still being screened, and an index captured when the upload started would
+     * by then name someone else's photo. Every screening result is applied by
+     * id, and a result for a photo that has since been removed lands nowhere,
+     * which is what should happen. */
+    const updatePhoto = (id: string, patch: Partial<AttachedPhoto>) => {
+        setAttachedPhotos((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    };
 
-        // Create preview URLs
-        newPhotos.forEach((file) => {
+    const handlePhotoUpload = (files: FileList) => {
+        const remaining = 3 - attachedPhotos.length;
+        const chosen = Array.from(files).slice(0, Math.max(0, remaining)); // Max 3 photos
+
+        chosen.forEach((file) => {
+            const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+            // The preview still arrives one FileReader at a time, so the photo
+            // count climbs one render at a time -- PhotoUpload's focus handling
+            // is built on that and must not be collapsed into a single update.
             const reader = new FileReader();
             reader.onloadend = () => {
-                setPhotoPreviewUrls((prev) => [...prev, reader.result as string]);
+                const dataUrl = reader.result as string;
+                setAttachedPhotos((prev) => (
+                    prev.length >= 3
+                        ? prev
+                        : [...prev, { id, previewUrl: dataUrl, original: dataUrl, state: 'uploading' }]
+                ));
             };
             reader.readAsDataURL(file);
+
+            // Screening starts immediately and in parallel with the preview:
+            // the network round trip is the slow half, and there is no reason
+            // for it to wait on a local FileReader.
+            api.screenPhoto(file, () => updatePhoto(id, { state: 'checking' }))
+                .then((result) => {
+                    if (result.status === 'blocked') {
+                        updatePhoto(id, {
+                            state: 'blocked',
+                            message: result.message
+                                || "This photo can't be used. Please choose a different one.",
+                            handle: undefined,
+                        });
+                        return;
+                    }
+                    if (result.status === 'needs_review') {
+                        // The handle holds no bytes -- nothing was screened --
+                        // so this photo is submitted inline and the server
+                        // parks it for staff. Say so plainly: it is attached,
+                        // it is just not going public unlooked-at.
+                        updatePhoto(id, { state: 'review', message: result.message });
+                        return;
+                    }
+                    updatePhoto(id, {
+                        state: 'ready',
+                        handle: result.handle,
+                        // Show them the blurred version, not the original.
+                        ...(result.preview ? { previewUrl: result.preview } : {}),
+                        message: result.faces || result.plates
+                            ? 'Ready to send — faces and licence plates blurred'
+                            : undefined,
+                    });
+                })
+                .catch(() => {
+                    // The screen call itself failed (offline, rate limited).
+                    // The photo is still attachable; it goes inline with the
+                    // report and the server decides what to do with it.
+                    updatePhoto(id, { state: 'error' });
+                });
         });
     };
 
     const handleRemovePhoto = (index: number) => {
-        setPhotos((prev) => prev.filter((_, i) => i !== index));
-        setPhotoPreviewUrls((prev) => prev.filter((_, i) => i !== index));
+        setAttachedPhotos((prev) => prev.filter((_, i) => i !== index));
     };
 
     const getIcon = (iconName: string) => {
@@ -1052,6 +1161,7 @@ export default function ResidentPortal() {
                                                 {/* Photo Upload */}
                                                 <PhotoUpload
                                                     previewUrls={photoPreviewUrls}
+                                                    statuses={photoStatuses}
                                                     onAdd={handlePhotoUpload}
                                                     onRemove={handleRemovePhoto}
                                                 />
@@ -1306,10 +1416,16 @@ export default function ResidentPortal() {
                                                 type="submit"
                                                 size="lg"
                                                 className="w-full"
-                                                isLoading={isSubmitting}
+                                                // Held only while a photo is still being checked, and
+                                                // said out loud rather than left as a dead button. This
+                                                // is the last of the old wait: it started at photo-pick
+                                                // time, so by the time anyone has finished typing a
+                                                // description it is almost always already over.
+                                                isLoading={isSubmitting || photosStillChecking}
+                                                disabled={photosStillChecking}
                                                 rightIcon={<Send className="w-5 h-5" />}
                                             >
-                                                {"Submit Request"}
+                                                {photosStillChecking ? "Checking your photos…" : "Submit Request"}
                                             </Button>
                                         ) : isLocationOutOfBounds ? (
                                             <div className="p-4 rounded-xl bg-red-500/20 border border-red-500/30 text-red-300 text-center">

@@ -60,6 +60,13 @@ PUBLIC_WRITES = {
     # Resident-facing, by design.
     ("open311.py", "post", "/requests.json"),                        # file a report
     ("open311.py", "post", "/public/requests/{request_id}/comments"),  # comment on your own report
+    # Screens a photo when the resident picks it, so the Vision round trip is
+    # not sitting on the Submit button. Unauthenticated for the same reason
+    # /requests.json is: a resident has no account. It writes a row and spends
+    # money, so it is limited harder than filing a report (12/min against 10),
+    # size-capped before the bytes are read, stores only the REDACTED image, and
+    # the row is reaped within the hour whether or not anyone claims it.
+    ("open311.py", "post", "/photos/screen"),
     ("system.py", "post", "/disclaimer/acknowledge"),                # records a click
     ("system.py", "post", "/translate/batch"),                       # renders the page
     ("roads.py", "post", "/road-check"),                             # is this street closed

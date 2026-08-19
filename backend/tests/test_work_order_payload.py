@@ -114,6 +114,14 @@ NEVER = {
     # `platform_feedback_email` is a town's support mailbox, which has no
     # business in a county system either.
     "platform_experience", "submitted_at", "platform_feedback_email",
+    # Photos the redactor could not clear. These are UNREDACTED -- the whole
+    # reason they are held out of media_urls is that nothing ever established
+    # there is no face in them -- and they are waiting on a staff decision that
+    # has not been made. Pushing one to a vendor would copy, into a system our
+    # retention policy cannot reach, exactly the image we declined to publish
+    # ourselves. A photo staff release moves into media_urls and travels the
+    # normal way from there.
+    "media_pending_review",
 }
 
 
