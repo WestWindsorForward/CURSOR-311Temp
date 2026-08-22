@@ -278,7 +278,7 @@ def subject(alerts: Sequence[Alert], town: str) -> str:
         return f"[{town}] {head} not working"
     if at_risk:
         head = at_risk[0].title if len(at_risk) == 1 else f"{len(at_risk)} services"
-        return f"[{town}] {head} may stop working"
+        return f"[{town}] {head} failing intermittently"
     if recovered:
         head = recovered[0].title if len(recovered) == 1 else f"{len(recovered)} services"
         return f"[{town}] {head} working again"
@@ -311,9 +311,15 @@ def compose(
     one link to the page where it is fixed. No stack traces, no connector ids,
     no advice we cannot stand behind.
     """
+    from app.services import email_layout as L
+
     now = now or datetime.now(timezone.utc)
     lines: List[str] = []
-    html: List[str] = []
+    # The HTML half is described as layout blocks rather than as markup, so the
+    # digest arrives looking like every other message the system sends -- and
+    # so a provider's error string is escaped by the renderer rather than by
+    # remembering to escape at every interpolation.
+    blocks: List[Dict[str, Any]] = []
 
     broken = [a for a in alerts if a.level == BROKEN]
     at_risk = [a for a in alerts if a.level == AT_RISK]
@@ -321,84 +327,78 @@ def compose(
 
     if broken:
         lines.append("Not working right now:")
-        html.append("<p><strong>Not working right now:</strong></p><ul>")
+        blocks.append(L.heading("Not working right now", 2))
+        items = []
         for a in broken:
             detail = f" — {a.last_error}" if a.last_error else ""
             lines.append(f"  • {a.title}{detail}")
             lines.append(f"    Last worked: {_when(a.last_success_at, now)}")
-            html.append(
-                f"<li><strong>{a.title}</strong>{_esc(detail)}<br>"
-                f"<span style=\"color:#666\">Last worked: {_when(a.last_success_at, now)}</span></li>"
-            )
-        html.append("</ul>")
+            items.append((f"{a.title}{detail}",
+                          f"Last worked: {_when(a.last_success_at, now)}"))
+        blocks.append(L.bullets(items))
         lines.append("")
 
     if at_risk:
-        lines.append("May stop working:")
-        html.append("<p><strong>May stop working:</strong></p><ul>")
+        # Not "may stop working". That predicted an outcome the sweep has no
+        # basis for and left the reader anxious without telling them anything
+        # to act on. The observed condition is that calls to these services are
+        # failing some of the time, which is a fact, and each line below gives
+        # the provider's own error and the date it last succeeded.
+        lines.append("Failing intermittently:")
+        blocks.append(L.heading("Failing intermittently", 2))
+        items = []
         for a in at_risk:
             detail = f" — {a.last_error}" if a.last_error else f" — {a.summary}"
             lines.append(f"  • {a.title}{detail}")
             lines.append(f"    Last worked: {_when(a.last_success_at, now)}")
-            html.append(
-                f"<li><strong>{a.title}</strong>{_esc(detail)}<br>"
-                f"<span style=\"color:#666\">Last worked: {_when(a.last_success_at, now)}</span></li>"
-            )
-        html.append("</ul>")
+            items.append((f"{a.title}{detail}",
+                          f"Last worked: {_when(a.last_success_at, now)}"))
+        blocks.append(L.bullets(items))
         lines.append("")
 
     if recovered:
         names = ", ".join(a.title for a in recovered)
         lines.append(f"Working again: {names}")
-        html.append(f"<p><strong>Working again:</strong> {_esc(names)}</p>")
+        blocks.append(L.callout(names, "success", title="Working again"))
         lines.append("")
 
     if settings_url:
-        lines.append(f"Check or fix these here: {settings_url}")
-        html.append(
-            f'<p><a href="{_esc(settings_url)}">Check or fix these in your settings</a></p>'
-        )
+        # The same words as the button. This digest is the one message that
+        # still composes its text half beside its blocks rather than from them,
+        # so the two can drift -- and had.
+        _settings_label = "Open the integrations settings page"
+        lines.append(f"{_settings_label}: {settings_url}")
+        blocks.append(L.button(_settings_label, settings_url))
         # Somebody who cannot stop a daily reminder filters the sender, and
         # that takes the next unrelated alert with it. So the way to stop it is
-        # in the message itself.
-        lines.append(
-            f"Already know about one of these? Mute it on that page and we will stop "
-            f"emailing about it for {MUTE_FOR.days} days -- unless it gets worse."
-        )
-        html.append(
-            '<p style="color:#666">Already know about one of these? Mute it on that '
-            f"page and we will stop emailing about it for {MUTE_FOR.days} days &mdash; "
-            "unless it gets worse.</p>"
-        )
+        # in the message itself -- stated as the guarantee it is, rather than
+        # as an aside after a dash. The escalation carve-out is the whole
+        # reason muting is safe to offer, so it gets its own sentence.
+        stop = (f"Muting an alert on that page stops these emails about it for "
+                f"{MUTE_FOR.days} days. An alert that escalates to a higher severity "
+                f"is still sent while the mute is in effect.")
+        lines.append(stop)
+        blocks.append(L.paragraph(stop, muted=True))
 
     lines.append("")
-    lines.append(
-        "This is sent automatically by the daily service check. It goes to "
-        "administrators only, and only when something changes."
-    )
-    html.append(
-        '<p style="color:#888;font-size:12px">This is sent automatically by the '
-        "daily service check. It goes to administrators only, and only when "
-        "something changes.</p>"
+    tail = ("Sent automatically by the daily service check, to administrators "
+            "only, and only when a connector's status changes.")
+    lines.append(tail)
+
+    message = L.build_email(
+        subject=subject(alerts, town),
+        township_name=town,
+        blocks=blocks,
+        preheader=", ".join(a.title for a in (broken or at_risk or recovered))[:120],
+        footer_lines=[tail],
+        no_reply_note="",
     )
 
     return {
-        "subject": subject(alerts, town),
+        "subject": message["subject"],
         "text": "\n".join(lines),
-        "html": "".join(html),
+        "html": message["html"],
     }
-
-
-def _esc(text: str) -> str:
-    """Escape before interpolating into the HTML body.
-
-    `last_error` is a provider's message, which means it is remote text of
-    unbounded shape arriving in an email we send -- exactly the input that
-    should never be pasted into markup unescaped.
-    """
-    import html as _html
-
-    return _html.escape(str(text), quote=True)
 
 
 # ---------------------------------------------------------------------------

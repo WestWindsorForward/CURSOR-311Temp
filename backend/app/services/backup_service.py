@@ -20,9 +20,14 @@ logger = logging.getLogger(__name__)
 BACKUP_PREFIX = "db_backup_"
 BACKUP_EXTENSION = ".sql.gpg"
 
+# Whether this process has already said that backups are not configured. See
+# `get_backup_config` for why it is a latch and not a plain warning.
+_CONFIG_INCOMPLETE_LOGGED = False
+
 
 async def get_backup_config() -> Optional[Dict[str, str]]:
     """Get backup configuration from Secret Manager."""
+    global _CONFIG_INCOMPLETE_LOGGED
     try:
         from app.services.secret_manager import get_secret
         
@@ -45,9 +50,26 @@ async def get_backup_config() -> Optional[Dict[str, str]]:
         # Check required keys
         required = ["BACKUP_S3_BUCKET", "BACKUP_S3_ACCESS_KEY", "BACKUP_S3_SECRET_KEY", "BACKUP_ENCRYPTION_KEY"]
         if not all(k in config for k in required):
-            logger.warning("Backup configuration incomplete - missing required secrets")
+            # Once per process. This is read on every backup-adjacent path,
+            # including the health check that runs every fifteen minutes, so a
+            # deployment that has not set up off-site backups was filling its
+            # log with a line that never changed and never would -- which is
+            # how a log stops being read.
+            #
+            # Nothing is lost by demoting it: "no backups configured" already
+            # reaches the admin as a warning on the health card
+            # (proactive_health._backup_age_check, key "backup"), which is
+            # where a persistent *state* belongs. A log line is for the first
+            # time a process notices, and for that it is still a warning.
+            if _CONFIG_INCOMPLETE_LOGGED:
+                logger.debug("Backup configuration incomplete - missing required secrets")
+            else:
+                logger.warning("Backup configuration incomplete - missing required secrets")
+                _CONFIG_INCOMPLETE_LOGGED = True
             return None
-        
+
+        # Configured now, so a later un-configuration is news again.
+        _CONFIG_INCOMPLETE_LOGGED = False
         return config
     except Exception as e:
         logger.error(f"Failed to get backup config: {e}")

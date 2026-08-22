@@ -69,20 +69,34 @@ def merge_into_canonical(rows: Sequence[Row], columns: Iterable[str]) -> tuple[O
     return canonical, others
 
 
-async def get_settings(db: Any, *, create: bool = False) -> Optional[Any]:
+async def get_settings(
+    db: Any, *, create: bool = False, fresh: bool = False
+) -> Optional[Any]:
     """Read the settings row deterministically.
 
     Ordered by id, so this returns the same row on every call regardless of how
     many exist or what the planner feels like doing. `create=True` inserts one
     when the table is empty, for the write paths.
+
+    `fresh=True` re-reads the row's columns from the database instead of
+    accepting the copy this session already has. The default is off because
+    almost every caller wants the cheap read, but it is not merely an
+    optimisation to skip: the SELECT below runs either way, and without
+    `populate_existing` the ORM discards the result and returns the identity
+    map's instance with whatever values it was first loaded with. A caller that
+    re-reads specifically to notice somebody else's committed change -- see
+    `host_secrets._store`, which re-reads mid-push to catch a town admin taking
+    a key back -- gets a stale answer and silently reverts them. Anything
+    checking for a concurrent write needs this flag.
     """
     from sqlalchemy import select
 
     from app.models import SystemSettings
 
-    row = (
-        await db.execute(select(SystemSettings).order_by(SystemSettings.id).limit(1))
-    ).scalar_one_or_none()
+    query = select(SystemSettings).order_by(SystemSettings.id).limit(1)
+    if fresh:
+        query = query.execution_options(populate_existing=True)
+    row = (await db.execute(query)).scalar_one_or_none()
     if row is None and create:
         row = SystemSettings()
         db.add(row)

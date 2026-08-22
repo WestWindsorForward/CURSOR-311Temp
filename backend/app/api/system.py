@@ -113,6 +113,23 @@ async def get_deployment_config(db: AsyncSession = Depends(get_db)):
         # must not take a working language switcher off the page.
         translation_enabled = True
 
+    # Whether the operator has answered the registration prompt for the whole
+    # deployment. It rides on this payload rather than an endpoint of its own
+    # because the console already reads this before deciding what the prompt
+    # looks like -- one request decides whether to show it and how.
+    #
+    # An unreadable settings row reads as "not dismissed", which leaves the
+    # prompt exactly where it has always been. The failure direction that
+    # matters is the other one: a database hiccup must not be able to hide the
+    # only channel a town has for security advisories.
+    try:
+        settings_row = await read_settings_row(db)
+        registration_prompt_dismissed = bool(
+            getattr(settings_row, "registration_prompt_dismissed", False)
+        )
+    except Exception:
+        registration_prompt_dismissed = False
+
     return {
         "managed_mode": app_settings.managed_mode,
         "app_version": app_settings.app_version,
@@ -124,6 +141,11 @@ async def get_deployment_config(db: AsyncSession = Depends(get_db)):
         # the console rather than opened in a new tab.
         "contact_form_url": (app_settings.contact_form_url or "").strip(),
         "contact_form_embed": bool(app_settings.contact_form_embed),
+        # True suppresses the prompt everywhere -- the first-run modal, the
+        # standing banner, and the block on the setup page. It is an override on
+        # top of the per-browser dismissal, not a replacement for it: false
+        # leaves that behaviour untouched.
+        "registration_prompt_dismissed": registration_prompt_dismissed,
     }
 
 
@@ -377,6 +399,24 @@ async def _stored_fields(providers: List[Dict[str, Any]]) -> Dict[str, bool]:
     return out
 
 
+async def _host_provided_fields(db, stored_fields: Dict[str, bool]) -> Dict[str, bool]:
+    """{credential key: this one came from the deployment's host}.
+
+    Sits beside `_stored_fields` and reads the same set of keys, because the
+    card needs both answers about the same box: whether anything is stored, and
+    whether the town or its host put it there. A host-provided credential is a
+    working credential -- the card is green, the badge says configured, and the
+    only difference is a note under the label, so a clerk is not sent looking
+    for an account the town does not have. Typing a value over it still saves
+    and still works; that is what takes the key back.
+
+    Presence and ownership only. Never a value.
+    """
+    from app.services import host_secrets
+
+    return await host_secrets.field_provenance(db, stored_fields)
+
+
 async def _configured_map(providers: List[Dict[str, Any]]) -> Dict[str, bool]:
     """{provider id: are all of its required credentials stored}.
 
@@ -505,8 +545,16 @@ async def connector_health_report(
     picks green.
     """
     from app.services import connector_health as ch
+    from app.services import health_mutes
 
-    healths = ch.worst_first(list((await ch.snapshot(db)).values()))
+    # `health:*` rows exist only to carry a mute for a proactive health check
+    # (disk, backups, ...). They are not integrations: they have no provider
+    # and nothing ever records a success against them, so leaving them in
+    # would put a permanently "unknown" phantom card on the Setup page.
+    healths = ch.worst_first([
+        h for h in (await ch.snapshot(db)).values()
+        if not health_mutes.is_health_row(h.connector)
+    ])
     return {
         "connectors": [
             {
@@ -552,15 +600,34 @@ async def mute_connector_alerts(
     one, which is the exact failure the health system exists to prevent -- so
     the card keeps saying it is broken, and adds that nobody is being emailed
     about it and until when.
+
+    The same route mutes a proactive health check (disk, backups, ...) under
+    the name `health:<check>`; those alerts are emailed by a different task but
+    the acknowledgement means the same thing, so it is stored the same way and
+    obeys the same escalation-breaks-through rule.
     """
     from sqlalchemy import select
 
     from app.models import ConnectorHealth
     from app.services import connector_alerts as alerts
+    from app.services import health_mutes
 
     row = (await db.execute(
         select(ConnectorHealth).where(ConnectorHealth.connector == connector)
     )).scalar_one_or_none()
+    health_check = health_mutes.check_key(connector)
+    if row is None and health_check is not None:
+        # A health check has no health row until somebody mutes it -- there is
+        # nothing for the probes to record against, the checks are computed
+        # fresh every run. Still allowlisted: `health:` is a namespace, not a
+        # licence to insert arbitrary names into the table.
+        from app.services.proactive_health import CHECK_KEYS
+
+        if health_check not in CHECK_KEYS:
+            raise HTTPException(status_code=404, detail="There is no health check by that name.")
+        row = ConnectorHealth(connector=connector, verifiable=False)
+        db.add(row)
+        await db.flush()
     if row is None:
         # Nothing has ever reported health for this name. Creating a row here
         # would let any admin request insert arbitrary connectors into a table
@@ -584,7 +651,16 @@ async def mute_connector_alerts(
         row.alert_muted_level = None
     else:
         row.alert_muted_until = alerts.mute_until(now, days=days)
-        row.alert_muted_level = alerts.alert_level(ch_classify(row, now=now))
+        if health_check is not None:
+            # Read the check's severity now rather than trusting the caller
+            # with it. The recorded level is what an escalation is later
+            # measured against, so a client that could name it could buy
+            # itself silence over an outage by muting "at risk".
+            row.alert_muted_level = health_mutes.alert_level(
+                await _health_check_status(db, health_check)
+            )
+        else:
+            row.alert_muted_level = alerts.alert_level(ch_classify(row, now=now))
     await db.commit()
 
     # Muting an alarm is exactly the kind of act that wants a name against it
@@ -616,6 +692,26 @@ def ch_classify(row, *, now=None):
     from app.services.connector_health import classify
 
     return classify(row, now=now)
+
+
+async def _health_check_status(db, key: str) -> str:
+    """What a proactive check is saying right now, for the mute to record.
+
+    Falls back to "critical" if the probes cannot be run: an unreadable
+    severity should produce the *narrowest* mute, and recording the worst
+    level is what makes a mute cover everything rather than break through on
+    the next reading. The alternative -- defaulting to healthy -- would file
+    the mute at a level nothing can match and silently do nothing.
+    """
+    try:
+        from app.services.proactive_health import collect_checks
+
+        for c in await collect_checks(db):
+            if c.get("key") == key:
+                return c.get("status") or "critical"
+    except Exception:
+        logger.debug("Could not read health check status for %s", key, exc_info=True)
+    return "critical"
 
 
 async def _last_result_for(db, capability: str, current: Optional[str] = None) -> Optional[dict]:
@@ -661,9 +757,11 @@ async def get_identity_catalog(
     from app.services.secret_manager import get_secret
     current = ((await get_secret(IDENTITY_PROVIDER_KEY)) or "auth0").strip().lower()
     providers = catalog_for_api()
+    stored = await _stored_fields(providers)
     return {"current_provider": current, "default_provider": "auth0",
             "providers": providers, "configured": await _configured_map(providers),
-            "stored_fields": await _stored_fields(providers),
+            "stored_fields": stored,
+            "host_provided": await _host_provided_fields(db, stored),
             "last_result": await _last_result_for(db, "identity", current)}
 
 
@@ -677,9 +775,11 @@ async def get_translation_catalog(
     from app.services.secret_manager import get_secret
     current = ((await get_secret(TRANSLATION_PROVIDER_KEY)) or "google").strip().lower()
     providers = catalog_for_api()
+    stored = await _stored_fields(providers)
     return {"current_provider": current, "default_provider": "google",
             "providers": providers, "configured": await _configured_map(providers),
-            "stored_fields": await _stored_fields(providers),
+            "stored_fields": stored,
+            "host_provided": await _host_provided_fields(db, stored),
             "last_result": await _last_result_for(db, "translation", current)}
 
 
@@ -695,9 +795,11 @@ async def get_maps_catalog(
     from app.services.secret_manager import get_secret
     current = normalize_provider(await get_secret(MAP_PROVIDER_KEY))
     providers = catalog_for_api()
+    stored = await _stored_fields(providers)
     return {"current_provider": current, "default_provider": "google",
             "providers": providers, "configured": await _configured_map(providers),
-            "stored_fields": await _stored_fields(providers),
+            "stored_fields": stored,
+            "host_provided": await _host_provided_fields(db, stored),
             "last_result": await _last_result_for(db, "maps", current)}
 
 
@@ -742,13 +844,15 @@ async def get_ai_catalog(
 
     resolved_model = current_model or AI_CATALOG.get(current_provider, {}).get("default_model")
     current_models = next((p["models"] for p in providers if p["provider"] == current_provider), [])
+    stored = await _stored_fields(providers)
     return {
         "current_provider": current_provider,
         "default_provider": "vertex",
         "current_model": resolved_model,
         "current_model_available": md.model_is_available(current_models, current_model),
         "configured": configured,
-        "stored_fields": await _stored_fields(providers),
+        "stored_fields": stored,
+        "host_provided": await _host_provided_fields(db, stored),
         "providers": providers,
         "last_result": await _last_result_for(db, "ai", current_provider),
     }
@@ -803,6 +907,7 @@ async def get_capability_catalog(
             capability, await get_secret(_PROVIDER_SELECT_KEY[capability])
         )
     providers = catalog_for_api(capability)
+    stored = await _stored_fields(providers)
 
     return {
         "current_provider": current,
@@ -817,7 +922,11 @@ async def get_capability_catalog(
         "configured": await _configured_map(providers),
         # Which individual boxes have something in them, so the form's
         # "Saved" hint stops appearing on empty optional ones.
-        "stored_fields": await _stored_fields(providers),
+        "stored_fields": stored,
+        # And which of those the deployment's host supplied rather than the
+        # town, so the hint can say so instead of sending a clerk to look for
+        # an account their town does not have.
+        "host_provided": await _host_provided_fields(db, stored),
         "last_result": await _last_result_for(db, capability, current),
         # Whether this card may change the selection. The secret store may not:
         # every credential the town has is in the current one and repointing the
@@ -965,18 +1074,36 @@ def _require_a_secret_store() -> None:
 _STORE_CHOICE_KEYS = {"SECRETS_PROVIDER"}
 
 
-async def _persist_secret(db: AsyncSession, key_name: str, value: str) -> bool:
+async def _persist_secret(
+    db: AsyncSession, key_name: str, value: str, *, from_host: bool = False
+) -> bool:
     """Write a secret to the configured store and keep an encrypted DB copy.
 
-    Returns whether the external store took it. That return value matters: when
-    the store is not reachable yet, set_secret returns False and logs at DEBUG,
-    which nothing raises the level for -- so the secret quietly lived only in
-    the database and the town had no way to know. It is a real ordering trap,
+    Returns whether the value ended up where this deployment intends it to
+    live. That return value matters: when an external store is configured but
+    not reachable yet, set_secret returns False and logs at DEBUG, which
+    nothing raises the level for -- so the secret quietly lived only in the
+    database and the town had no way to know. It is a real ordering trap,
     because the credentials that make Secret Manager reachable are themselves
     entered on this page: anything saved before them lands in the database and
     stays there until somebody happens to run the migration.
 
+    False therefore means "this was supposed to go somewhere else and did not",
+    NOT merely "it is in the database". On a town whose chosen store is the
+    database -- or which has not chosen one yet -- there is no somewhere else,
+    set_secret returns False for every key by design, and this returns True:
+    the credential is exactly where it belongs. Reporting those as db-only
+    made every save on the default deployment look like a credential about to
+    disappear.
+
     The caller surfaces this rather than swallowing it.
+
+    `from_host` marks the one caller that is not a town admin: the provisioning
+    endpoint through which the deployment's host supplies credentials. Every
+    other write is somebody at the town typing into a box, and that is what
+    takes ownership of a key back off the host -- see `host_secrets.forget`.
+    The flag defaults to the town reading, so a write path added later has to
+    opt out of it on purpose rather than by forgetting.
     """
     from app.core.encryption import encrypt
     from app.core.managed import reject_platform_key_writes
@@ -1002,7 +1129,16 @@ async def _persist_secret(db: AsyncSession, key_name: str, value: str) -> bool:
     # relying on DB_REQUIRED_KEYS to keep its database copy from being scrubbed
     # -- which worked, and still wrote the name of the store into the store.
     bootstrap_keys = {"GCP_SERVICE_ACCOUNT_JSON", "GOOGLE_CLOUD_PROJECT"} | _STORE_CHOICE_KEYS
-    stored_externally = key_name in bootstrap_keys
+    # A deployment whose chosen store IS the encrypted database, or which has
+    # not chosen one yet, has nothing outside the database to write to --
+    # `set_secret` returns False for every key by design, not by failure. Read
+    # as "the store rejected it", that turned an ordinary save on an ordinary
+    # database-store town into a warning that the credential was about to
+    # vanish, on every key, forever. The return value below means "the value is
+    # where this deployment intends it to live", which is true here.
+    from app.services.secret_manager import external_store_configured
+    has_external_store = external_store_configured()
+    stored_externally = key_name in bootstrap_keys or not has_external_store
     if value and key_name not in bootstrap_keys:
         try:
             if await set_secret(key_name, value):
@@ -1025,6 +1161,17 @@ async def _persist_secret(db: AsyncSession, key_name: str, value: str) -> bool:
         secret.is_configured = bool(value)
     else:
         db.add(SystemSecret(key_name=key_name, key_value=enc, is_configured=bool(value)))
+    # The town has just entered a value of its own, so this key is no longer
+    # the host's to replace or withdraw. In the same transaction as the write
+    # it belongs to: an ownership record that can land without the value, or
+    # the value without it, is a race that reverts a clerk's credential.
+    #
+    # A blank value is "keep what is stored" everywhere else on this page and
+    # means the same here -- clearing a box does not claim the key.
+    if value and not from_host:
+        from app.services import host_secrets
+
+        await host_secrets.forget(db, key_name)
     await db.commit()
     return stored_externally
 
@@ -2868,10 +3015,15 @@ async def list_secrets(
     texting was on, and now asks /providers/status, which reports what dispatch
     resolves rather than what is stored.
     """
+    from app.services import host_secrets
     from app.services.secret_manager import get_secret
 
     result = await db.execute(select(SystemSecret))
     secrets = result.scalars().all()
+
+    # Who supplied each one. Names only, read once for the whole list rather
+    # than per row.
+    from_host = set(await host_secrets.host_provided(db))
 
     response = []
     for secret in secrets:
@@ -2884,6 +3036,11 @@ async def list_secrets(
             # and saying so is the safe direction: the cost is asking about
             # something already done, rather than ticking something unreadable.
             data.is_configured = False
+        # Both halves, the same rule `field_provenance` uses: the host owns this
+        # key AND there is a value stored under it. A key the host has since
+        # withdrawn otherwise keeps saying "supplied by your host" next to an
+        # empty box, which reads as a credential the town has and does not.
+        data.host_provided = secret.key_name in from_host and bool(data.is_configured)
         response.append(data)
 
     return response
@@ -2948,7 +3105,24 @@ async def create_or_update_secret(
             is_configured=bool(secret_data.key_value)
         )
         db.add(secret)
-    
+
+    # The other door into the secret table, and so the other place ownership
+    # has to move. This endpoint does not go through `_persist_secret` -- it
+    # predates it and writes the row itself -- so the same clearing has to be
+    # here, or a plain secret field would be the one way a town could enter its
+    # own credential and still have the host overwrite it on the next push.
+    #
+    # Unconditional, unlike `_persist_secret`, and the difference is deliberate.
+    # There a blank value means "keep what is stored" -- it is the partial save
+    # a provider card sends when a masked box was not touched. Here the box IS
+    # the credential and saving it empty is somebody clearing it on purpose:
+    # a town that deletes a host-supplied key has decided it does not want that
+    # key, and leaving it host-owned meant the next scheduled push put it
+    # straight back with no trace of who undid the deletion.
+    from app.services import host_secrets
+
+    await host_secrets.forget(db, secret_data.key_name)
+
     await db.commit()
     await db.refresh(secret)
 

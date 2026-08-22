@@ -22,6 +22,23 @@ import {
 
 const API_BASE = '/api';
 
+/** What POST /open311/v2/photos/screen answers with. */
+export interface ScreenedPhotoResult {
+    /** Opaque, single-use, expires in an hour. Quoted in media_urls at submit. */
+    handle: string;
+    /** ready: usable, `preview` holds the redacted image.
+     *  blocked: explicit content, the photo cannot be attached at all.
+     *  needs_review: the check could not be completed; the photo is still
+     *  attachable but a staff member releases it before it is public. */
+    status: 'ready' | 'blocked' | 'needs_review';
+    message?: string;
+    reason?: string;
+    faces?: number;
+    plates?: number;
+    /** The redacted image, present only when status is "ready". */
+    preview?: string;
+}
+
 /** Deployment-level shape the admin UI branches on, from GET /system/config. */
 export interface SystemConfig {
     /** State-hosted: the orchestrator owns the infrastructure credentials. */
@@ -35,6 +52,10 @@ export interface SystemConfig {
     contact_form_url?: string;
     /** Whether that form may be shown in a frame inside the console. */
     contact_form_embed?: boolean;
+    /** The operator has answered the registration prompt for the whole
+     *  deployment, so it is not shown to anybody. Absent or false means the
+     *  per-browser dismissal decides, as it always has. */
+    registration_prompt_dismissed?: boolean;
 }
 
 // GovTech platform integration types
@@ -227,6 +248,17 @@ export interface ProviderCatalog {
      *  configured every one of its boxes claimed to be saved -- including an
      *  optional one nobody had filled in. Presence only; no values. */
     stored_fields?: Record<string, boolean>;
+    /** Which of those boxes hold a credential the deployment's host supplied
+     *  rather than the town -- true only where a value is actually stored.
+     *
+     *  A hosted town frequently has no account of its own with a map or
+     *  translation vendor, so its host can supply working credentials and the
+     *  card is configured like any other. This only changes the wording of the
+     *  per-box "Saved" hint, so a clerk is not sent looking for an account
+     *  their town does not have. The town can still save its own value over
+     *  it, and that takes the key off the host's list. Absent on a standalone
+     *  install, where there is no host to provide one. */
+    host_provided?: Record<string, boolean>;
     /** Whether this card may change the provider. False for the secret store:
      *  every credential the town has is in the current one and repointing the
      *  setting does not move them, so the switch belongs to the cloud-profile
@@ -386,7 +418,18 @@ class ApiClient {
                 const messages = error.detail.map((e: any) => e.msg || e.message || JSON.stringify(e)).join(', ');
                 throw new Error(messages || 'Validation error');
             }
-            throw new Error(error.detail || error.message || 'Request failed');
+            const failure = new Error(
+                (typeof error.detail === 'string' ? error.detail : error.detail?.message)
+                || error.message || 'Request failed',
+            ) as Error & { detail?: any; status?: number };
+            // The structured body, for callers that branch on it. Several
+            // endpoints answer 409 with an object -- a jurisdiction redirect, a
+            // stale photo handle -- carrying what the client needs to recover,
+            // and flattening it to a string left "[object Object]" in a
+            // resident-facing error message.
+            failure.detail = error.detail;
+            failure.status = response.status;
+            throw failure;
         }
 
         if (response.status === 204) {
@@ -481,11 +524,93 @@ class ApiClient {
     }
 
     // Service Requests (Public)
-    async createRequest(data: ServiceRequestCreate): Promise<ServiceRequest> {
-        return this.request<ServiceRequest>('/open311/v2/requests.json', {
-            method: 'POST',
-            body: JSON.stringify(data),
+    /**
+     * Moderate and blur one photo now, before the report exists.
+     *
+     * Called the moment the resident picks a photo, so the Google Vision round
+     * trip happens while they are still typing the description instead of on
+     * the Submit button. What comes back is a handle to quote at submit time
+     * and, when the photo is usable, the REDACTED image -- the thumbnail the
+     * resident sees is the one the town will actually publish, blurred faces
+     * and all, rather than the original they chose.
+     */
+    screenPhoto(file: File, onUploaded?: () => void): Promise<ScreenedPhotoResult> {
+        const body = new FormData();
+        body.append('file', file);
+
+        // XMLHttpRequest rather than fetch, for `upload.onload` alone. It fires
+        // when the request body has finished going up and before the response
+        // starts coming back, which is the real boundary between "uploading"
+        // and "checking" -- the two halves the resident is shown. fetch cannot
+        // observe it, and a progress indicator that guesses where it is has no
+        // business being on a screen someone is waiting at.
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', `${API_BASE}/open311/v2/photos/screen`);
+            // No Content-Type set: the browser has to write the multipart
+            // boundary itself.
+            if (xhr.upload && onUploaded) xhr.upload.onload = () => onUploaded();
+            xhr.onload = () => {
+                let parsed: any = {};
+                try { parsed = JSON.parse(xhr.responseText); } catch { /* non-JSON error body */ }
+                if (xhr.status >= 200 && xhr.status < 300) resolve(parsed as ScreenedPhotoResult);
+                else reject(new Error(parsed.detail || 'Could not check that photo'));
+            };
+            xhr.onerror = () => reject(new Error('Could not check that photo'));
+            xhr.send(body);
         });
+    }
+
+    /**
+     * File the report.
+     *
+     * `inlineFallback` maps a photo handle to the original image, for the one
+     * case the server cannot recover from on its own: a handle that expired
+     * while the resident was filling in the form. The bytes were never kept
+     * server-side -- that is the point of the design -- so the server answers
+     * 409 naming the dead handles and we resend those photos inline, taking the
+     * screen-at-submit path they would have taken before any of this existed.
+     * Retried once: a second failure is a real fault, not a stale handle.
+     */
+    async createRequest(
+        data: ServiceRequestCreate,
+        inlineFallback?: Record<string, string>,
+    ): Promise<ServiceRequest> {
+        try {
+            return await this.request<ServiceRequest>('/open311/v2/requests.json', {
+                method: 'POST',
+                body: JSON.stringify(data),
+            });
+        } catch (err) {
+            const detail = (err as Error & { detail?: any }).detail;
+            const stale: string[] = detail?.error === 'stale_photo_handles' ? detail.handles || [] : [];
+            if (!stale.length || !inlineFallback) throw err;
+
+            const retried = (data.media_urls || []).map(
+                (m) => (stale.includes(m) && inlineFallback[m]) || m,
+            ).filter((m) => !stale.includes(m));
+
+            return this.request<ServiceRequest>('/open311/v2/requests.json', {
+                method: 'POST',
+                body: JSON.stringify({ ...data, media_urls: retried }),
+            });
+        }
+    }
+
+    /**
+     * Publish or discard a photo the redactor could not clear (staff).
+     *
+     * These land when the detector times out or errors, which used to mean the
+     * photo was published unblurred with a note in a log nobody reads. It waits
+     * instead, out of every public surface, until a person has looked at it.
+     */
+    async reviewWithheldPhoto(
+        requestId: string, index: number, release: boolean,
+    ): Promise<ServiceRequestDetail> {
+        return this.request<ServiceRequestDetail>(
+            `/open311/v2/requests/${requestId}/media/${index}/review`,
+            { method: 'POST', body: JSON.stringify({ release }) },
+        );
     }
 
     async getPublicRequests(status?: string, serviceCode?: string): Promise<PublicServiceRequest[]> {
@@ -664,6 +789,16 @@ class ApiClient {
             method: 'POST',
             body: JSON.stringify(days === undefined ? {} : { days }),
         });
+    }
+
+    /** The same acknowledgement, for a proactive health check (disk, backups,
+     *  ...). It rides the connector mute deliberately: same storage, same
+     *  audit event, and above all the same rule that an escalation breaks
+     *  through a mute taken at a lower severity. */
+    async muteHealthCheck(key: string, days?: number): Promise<{
+        connector: string; muted_until: string | null; muted_level: string | null;
+    }> {
+        return this.muteConnectorAlerts(`health:${key}`, days);
     }
 
     async updateUser(id: number, data: UserUpdate): Promise<User> {
@@ -1135,6 +1270,23 @@ class ApiClient {
         });
     }
 
+    /** Record one anonymous answer to the platform-feedback question.
+     *
+     *  Sends the chosen option and nothing else — no id, no report reference,
+     *  no session. The server 404s this when the module is off. */
+    async submitPlatformFeedback(platformExperience: string): Promise<{ status: string }> {
+        return this.request('/feedback/platform', {
+            method: 'POST',
+            body: JSON.stringify({ platform_experience: platformExperience }),
+        });
+    }
+
+    /** Aggregate platform feedback for the statistics page. Staff only, and
+     *  404s when the module is off. */
+    async getPlatformFeedbackStatistics(): Promise<import('../types').PlatformFeedbackStatistics> {
+        return this.request('/feedback/platform/statistics');
+    }
+
     /** Redirect counts for the statistics page. */
     async getRedirectedStatistics(days = 30): Promise<{
         days: number;
@@ -1579,6 +1731,12 @@ class ApiClient {
         skipped_keys: string[];
         failed: number;
         failed_keys: Array<{ key: string; error: string }>;
+        // Secrets that could not be decrypted: encrypted under a SECRET_KEY
+        // this deployment no longer has. Counted apart from `failed`, which
+        // means the store refused the write, because the remedy is a different
+        // one -- the old key, not a retry.
+        unreadable?: number;
+        unreadable_keys?: Array<{ key: string; error: string }>;
         reason?: string;
         error?: string;
     }> {
@@ -1931,6 +2089,12 @@ export interface HealthCheck {
     value: number | null;
     message: string;
     action: string;
+    /* Whether an admin has said "I know about this one", which stops the
+     * emails only. `status` is untouched by a mute and the check is still
+     * returned, so the panel can grey the row without pretending it passed.
+     * Optional: a backend that predates health-check muting omits both. */
+    muted?: boolean;
+    muted_until?: string | null;
 }
 
 export interface HealthSummary {

@@ -54,8 +54,9 @@ import { Button, Card, Modal, Input, Textarea, Select, StatusBadge, Badge } from
 import { useAuth } from '../context/AuthContext';
 import { useSettings } from '../context/SettingsContext';
 import { api, MapLayer, IntegrationRequestLink } from '../services/api';
-import { ServiceRequest, ServiceRequestDetail, ServiceDefinition, Statistics, AdvancedStatistics, RequestComment, ClosedSubstatus, User as UserType, Department, AuditLogEntry, HeatmapData } from '../types';
+import { ServiceRequest, ServiceRequestDetail, ServiceDefinition, Statistics, AdvancedStatistics, RequestComment, ClosedSubstatus, User as UserType, Department, AuditLogEntry, HeatmapData, PlatformFeedbackStatistics } from '../types';
 import { XAxis, YAxis, ResponsiveContainer, AreaChart, Area, Tooltip } from 'recharts';
+import PlatformFeedbackStats from '../components/PlatformFeedbackStats';
 import StaffDashboardMap from '../components/StaffDashboardMap';
 import RequestDetailMap from '../components/RequestDetailMap';
 import SpatialBiasHeatmap from '../components/SpatialBiasHeatmap';
@@ -63,7 +64,7 @@ import { usePageNavigation } from '../hooks/usePageNavigation';
 import NotificationSettings from '../components/NotificationSettings';
 import ManualIntake from '../components/ManualIntake';
 import ActivityFeed from '../components/ActivityFeed';
-import { bellAppearance, readIdsFromStorage, unreadCount } from '../components/activityBell';
+import { bellAppearance, markKeyRead, readIdsFromStorage, readKey, unreadCount } from '../components/activityBell';
 import { bandFor, bandLabel, countByBand } from '../components/priority';
 import PrintWorkOrder from '../components/PrintWorkOrder';
 
@@ -131,6 +132,10 @@ export default function StaffDashboard() {
     // nobody worked them and they appear in no queue or feed -- but the count is
     // how a town learns one road is turning away twenty people a month.
     const [redirects, setRedirects] = useState<Awaited<ReturnType<typeof api.getRedirectedStatistics>> | null>(null);
+    // Aggregate answers to the optional platform-feedback question. Null when
+    // the module is off, in which case the endpoint 404s and the panel below
+    // renders nothing -- off is off, not hidden.
+    const [platformFeedback, setPlatformFeedback] = useState<PlatformFeedbackStatistics | null>(null);
     const [heatmapData, setHeatmapData] = useState<HeatmapData | null>(null);
 
     // Dashboard-specific state
@@ -442,6 +447,32 @@ export default function StaffDashboard() {
         }
     }, [currentView]);
 
+    // Platform feedback loads on its own rather than inside loadStatistics(),
+    // for two reasons. It is gated on a module flag that arrives with
+    // `settings`, which can land after the statistics fetch has already run --
+    // so it needs the flag in its dependency list. And a town that never
+    // enabled the module must not request it at all: the endpoint 404s by
+    // design, and folding that into loadStatistics() would put "Platform
+    // feedback: Not found" in the error banner of every town that left the
+    // module off.
+    useEffect(() => {
+        if (currentView !== 'statistics') return;
+        if (!settings?.modules?.platform_feedback) return;
+        if (platformFeedback) return;
+        let cancelled = false;
+        api.getPlatformFeedbackStatistics()
+            .then((data) => { if (!cancelled) setPlatformFeedback(data); })
+            .catch((err) => {
+                if (!cancelled) {
+                    setStatsErrors((prev) => [
+                        ...prev,
+                        `Platform feedback: ${err instanceof Error ? err.message : 'request failed'}`,
+                    ]);
+                }
+            });
+        return () => { cancelled = true; };
+    }, [currentView, settings?.modules?.platform_feedback]);
+
     // Refresh the open request, not just the list.
     //
     // The 30s poll above replaces `allRequests`, which is why the list and
@@ -628,6 +659,16 @@ export default function StaffDashboard() {
     };
 
     const loadRequestDetail = async (requestId: string) => {
+        // Opening a request's detail view is how a staff user reads it --
+        // whether that's a mouse click on a card, Enter/Space on one (both
+        // fire the same button onClick), a hash change from browser
+        // back/forward, or a "similar reports" jump. Every path lands here,
+        // so this is the one place to clear that request's unread bell
+        // notification. `markKeyRead` already no-ops (no localStorage write,
+        // no re-render) when there was nothing unread to clear.
+        if (markKeyRead(readKey({ service_request_id: requestId }))) {
+            setActivityTick(t => t + 1);
+        }
         try {
             const detail = await api.getRequestDetail(requestId);
             setSelectedRequest(detail);
@@ -1424,6 +1465,15 @@ export default function StaffDashboard() {
                                     </p>
                                 </div>
                             )}
+
+                            {/* Platform feedback, when the town runs that module.
+                                Aggregates only -- the table holds a categorical
+                                answer and a timestamp per response and nothing
+                                else, so there is no individual record to open. */}
+                            <PlatformFeedbackStats
+                                enabled={settings?.modules?.platform_feedback}
+                                stats={platformFeedback}
+                            />
 
                             {slaPerf && slaPerf.categories.length > 0 && (
                                 <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl p-4 sm:p-6">
@@ -2381,6 +2431,58 @@ export default function StaffDashboard() {
                                                     {selectedRequest.media_urls.map((url, i) => (
                                                         <img key={i} src={url} alt={`Photo ${i + 1}`} className="w-28 h-20 flex-shrink-0 object-cover rounded-lg cursor-pointer hover:opacity-80 ring-1 ring-white/10" onClick={() => setLightboxUrl(url)} />
                                                     ))}
+                                                </div>
+                                            )}
+
+                                            {/* Photos the automatic blur could not clear. They are
+                                                held out of media_urls entirely, so nothing public
+                                                can render one -- this panel is the only place they
+                                                appear and the only way one ever becomes public. */}
+                                            {!!selectedRequest.media_pending_review?.length && (
+                                                <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                                                    <p className="text-sm text-amber-200 font-medium mb-1">
+                                                        {selectedRequest.media_pending_review.length === 1
+                                                            ? '1 photo needs your review'
+                                                            : `${selectedRequest.media_pending_review.length} photos need your review`}
+                                                    </p>
+                                                    <p className="text-xs text-amber-200/70 mb-3">
+                                                        The automatic face and licence-plate blur could not run on
+                                                        these, so they have been kept off the public tracker, the map
+                                                        and the Open311 feed. Check for faces and plates before
+                                                        releasing one.
+                                                    </p>
+                                                    <div className="flex gap-3 flex-wrap">
+                                                        {selectedRequest.media_pending_review.map((photo, i) => (
+                                                            <div key={i} className="space-y-1">
+                                                                <img
+                                                                    src={photo.media}
+                                                                    alt={`Photo awaiting review ${i + 1}`}
+                                                                    className="w-28 h-20 object-cover rounded-lg cursor-pointer ring-1 ring-amber-400/40"
+                                                                    onClick={() => setLightboxUrl(photo.media)}
+                                                                />
+                                                                <div className="flex gap-1">
+                                                                    <button
+                                                                        type="button"
+                                                                        className="px-2 py-1 text-xs rounded bg-emerald-600/80 hover:bg-emerald-600 text-white"
+                                                                        onClick={async () => setSelectedRequest(
+                                                                            await api.reviewWithheldPhoto(
+                                                                                selectedRequest.service_request_id, i, true))}
+                                                                    >
+                                                                        Publish
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="px-2 py-1 text-xs rounded bg-white/10 hover:bg-white/20 text-white/80"
+                                                                        onClick={async () => setSelectedRequest(
+                                                                            await api.reviewWithheldPhoto(
+                                                                                selectedRequest.service_request_id, i, false))}
+                                                                    >
+                                                                        Discard
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
                                                 </div>
                                             )}
 

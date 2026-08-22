@@ -328,13 +328,34 @@ async def _report(db, township: str, *, changes, status) -> None:
             return
 
         await configure_notifications(db)
+        from app.services import email_layout as L
+
+        tone_for = {"error": "critical", "warning": "warning", "info": "info"}
         for alert in alerts:
+            # The alert body is prose written in paragraphs. Through the shared
+            # layout it now looks like every other message this system sends,
+            # and it gains the plain-text part it never had.
+            paragraphs = [p.strip() for p in alert.body.split("\n\n") if p.strip()]
+            tone = tone_for.get(alert.severity, "info")
+            message = L.build_email(
+                subject=alert.subject,
+                township_name=township,
+                preheader=paragraphs[0][:120] if paragraphs else "",
+                blocks=(
+                    [L.heading(alert.subject, 2),
+                     L.callout(paragraphs[0] if paragraphs else alert.subject, tone,
+                               title=f"{alert.severity.upper()} - Road data")]
+                    + [L.paragraph(p) for p in paragraphs[1:]]
+                ),
+                footer_lines=["Road data check. Sent to administrators only."],
+            )
             for admin in admins:
                 try:
                     notification_service.send_email(
                         to=admin.email,
-                        subject=alert.subject,
-                        body_html=f"<p>{alert.body}</p>".replace("\n\n", "</p><p>"),
+                        subject=message["subject"],
+                        body_html=message["html"],
+                        body_text=message["text"],
                     )
                 except Exception as exc:
                     logger.warning("could not email road alert to %s: %s", admin.email, exc)

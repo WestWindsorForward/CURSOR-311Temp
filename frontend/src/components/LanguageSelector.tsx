@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Globe, Check, ChevronDown, Search } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from '../context/TranslationContext';
@@ -130,15 +130,37 @@ export default function LanguageSelector() {
         lang.code.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
+    // The dropdown could only be dismissed by clicking the backdrop, which
+    // leaves a keyboard user inside a list of 100+ languages with no way out
+    // but tabbing through all of them. Escape closes it and hands focus back
+    // to the trigger, the same contract as every other menu in the app.
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            setIsOpen(false);
+            setSearchQuery('');
+            triggerRef.current?.focus();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [isOpen]);
+
     const changeLanguage = (code: string) => {
+        // Picking a language unmounts the button that was focused, so focus
+        // goes back to the trigger -- the same place Escape leaves it, rather
+        // than dropping to <body> and restarting Tab from the top of the page.
         if (code === language) {
             setIsOpen(false);
             setSearchQuery('');
+            triggerRef.current?.focus();
             return;
         }
         setLanguage(code);
         setIsOpen(false);
         setSearchQuery('');
+        triggerRef.current?.focus();
         // Refresh the page to apply translations cleanly
         setTimeout(() => {
             window.location.reload();
@@ -148,9 +170,18 @@ export default function LanguageSelector() {
     return (
         <div className="relative">
             <button
+                ref={triggerRef}
                 onClick={() => setIsOpen(!isOpen)}
                 className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 transition-all text-white shadow-lg"
-                aria-label="Select language"
+                aria-label={`Select language, currently ${currentLanguage.name}`}
+                // Not "listbox": the popup is a search field plus ordinary
+                // buttons, and claiming a listbox that has no options makes a
+                // screen reader announce a control the user cannot find. The
+                // honest claim is that a popup opens; the buttons inside are
+                // announced as buttons, which is what they are, and the
+                // current language carries aria-current.
+                aria-haspopup="true"
+                aria-expanded={isOpen}
             >
                 <Globe className="w-4 h-4 flex-shrink-0" />
                 <span className="hidden sm:inline text-sm font-medium">{currentLanguage.nativeName}</span>
@@ -164,6 +195,7 @@ export default function LanguageSelector() {
                         {/* Backdrop */}
                         <div
                             className="fixed inset-0 z-[9998]"
+                            aria-hidden="true"
                             onClick={() => {
                                 setIsOpen(false);
                                 setSearchQuery('');
@@ -187,6 +219,7 @@ export default function LanguageSelector() {
                                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
                                     <input
                                         type="text"
+                                        aria-label="Search languages"
                                         placeholder="Search languages..."
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
@@ -210,6 +243,9 @@ export default function LanguageSelector() {
                                         <button
                                             key={lang.code}
                                             onClick={() => changeLanguage(lang.code)}
+                                            // The check mark is the only sighted
+                                            // marker of the active language.
+                                            aria-current={language === lang.code ? 'true' : undefined}
                                             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-left ${language === lang.code
                                                 ? 'bg-primary-500/30 text-white border border-primary-400/30'
                                                 : 'text-white/80 hover:bg-white/10 hover:text-white'

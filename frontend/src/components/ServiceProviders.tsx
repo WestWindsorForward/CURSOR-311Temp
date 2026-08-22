@@ -1133,6 +1133,7 @@ function CapabilityCard({ cap, title, blurb, icon: Icon, delay, recheckToken, re
                                 ctx={stepCtx}
                                 identity={identity}
                                 storedFields={catalog.stored_fields}
+                                hostProvided={catalog.host_provided}
                                 alreadySet={alreadySet}
                             />
                         </div>

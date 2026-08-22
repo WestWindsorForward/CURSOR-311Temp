@@ -327,14 +327,32 @@ onWantAi: () => Promise<void>;
                 {/* Pasting is still allowed -- some towns get the key by
                     email from whoever administers the project -- but the
                     file picker is first, because a downloaded file is what
-                    step 4 actually leaves you holding. */}
-                <textarea
-                    placeholder="…or paste the contents"
-                    value={secretValues[jsonKey] || ''}
-                    onChange={(e) => setSecretValues(p => ({ ...p, [jsonKey]: e.target.value }))}
-                    rows={2}
-                    className="mt-2 w-full text-xs bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white placeholder-white/30 focus:outline-none focus:border-primary-400/50 resize-none font-mono"
-                />
+                    step 4 actually leaves you holding.
+
+                    Masked, through the same field every other credential on
+                    this page uses. This was a bare <textarea>, and it was the
+                    one place a private key sat in plain text on screen: the
+                    file picker above writes into the very same state, so
+                    choosing the .json file printed the whole service-account
+                    key -- private_key included -- into a box that stayed
+                    visible while a clerk carried on scrolling, screen-sharing
+                    with whoever was helping them, or walking away from the
+                    desk. The reveal toggle is still there for eyeballing a
+                    truncated paste, which is the only reason the value ever
+                    needs to be on screen at all.
+
+                    kind="json" rather than inferred, so the advisory line says
+                    whether what was pasted or read parses -- the one check
+                    worth having here, since the value is now dots. */}
+                <div className="mt-2">
+                    <SecretField
+                        label="…or paste the contents"
+                        value={secretValues[jsonKey] || ''}
+                        onChange={(v: string) => setSecretValues(p => ({ ...p, [jsonKey]: v }))}
+                        secret
+                        kind="json"
+                    />
+                </div>
             </div>
 
             <SecretField
@@ -593,6 +611,14 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
      * would invite somebody to register and the modal it opens would show them
      * the built-in form instead. */
     const [contactFormUrl, setContactFormUrl] = useState('');
+    /* The operator has answered the registration question for this deployment
+     * (system_settings.registration_prompt_dismissed), so the block below is not
+     * shown at all -- neither shape of it. Unlike the modal and the banner this
+     * one was never dismissible in the first place, which is exactly why it
+     * needs the flag: it is the surface that would otherwise keep asking
+     * forever. Defaults to false, so a config read that fails leaves the page
+     * as it has always been. */
+    const [registrationDismissed, setRegistrationDismissed] = useState(false);
     /* Which provider each capability is on, and which are set up.
      *
      * Per provider, not per capability: "maps is configured" was true if any
@@ -684,6 +710,7 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
                 setManagedMode(!!cfg?.managed_mode);
                 setPublicOrigin(cfg?.public_origin ?? null);
                 setContactFormUrl(buildContactFormUrl(cfg?.contact_form_url));
+                setRegistrationDismissed(cfg?.registration_prompt_dismissed === true);
             })
             .catch(() => setManagedMode(false));
     }, []);
@@ -1152,8 +1179,14 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
                   * Two shapes: when the operator hosts a registration form
                   * (CONTACT_FORM_URL), an invitation that opens it inside the
                   * console; otherwise the built-in contact form, so a
-                  * self-hoster without a form loses nothing. */}
-                {contactFormUrl ? (
+                  * self-hoster without a form loses nothing.
+                  *
+                  * Three, counting absent. An operator who has answered the
+                  * question for the deployment gets neither shape: this is the
+                  * one registration surface with no dismissal of its own, so
+                  * without the flag it would go on asking a deployment that has
+                  * already registered. */}
+                {!registrationDismissed && (contactFormUrl ? (
                     <div className="mt-4 pt-3 border-t border-white/10">
                         {/* A button, not a link. The form opens inside the
                           * console -- `immediate` tells the host that this click
@@ -1197,7 +1230,7 @@ export default function SetupIntegrationsPage({ secrets, onSaveSecret, onRefresh
                             Register a contact (optional)
                         </button>
                     </div>
-                )}
+                ))}
             </motion.div>
 
             {/* ── Setup Instructions (collapsible) ── */}

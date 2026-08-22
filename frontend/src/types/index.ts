@@ -189,12 +189,23 @@ export interface PublicServiceRequest {
     assigned_department_name: string | null;
 }
 
+/** A photo the redactor could not clear, waiting on a staff decision. */
+export interface PendingReviewPhoto {
+    media: string;
+    /** provider-error | error | no-detector | blur-failed */
+    reason?: string;
+}
+
 export interface ServiceRequestDetail extends ServiceRequest {
     first_name: string | null;
     last_name: string | null;
     email: string;
     phone: string | null;
     media_urls: string[];  // Array of photo URLs
+    /** Photos held back from every public surface because the face and plate
+     *  blur could not be completed — a detector timeout or outage. Unredacted,
+     *  staff-only, and published only if a staff member releases one. */
+    media_pending_review?: PendingReviewPhoto[];
     /** Platforms this request exists in. Empty means the work-order
      *  refresh has nothing to pull, so the button is not offered. */
     external_links?: string[];
@@ -313,7 +324,16 @@ export interface SystemSettings {
     modules: {
         research_portal?: boolean;
         unlisted_reports?: boolean;
+        /** The optional one-question platform-feedback module. Off unless the
+         *  town says otherwise; the server 404s the endpoints when it is off,
+         *  so this flag only decides whether the UI is drawn. */
+        platform_feedback?: boolean;
     };
+    /** Where "want to tell us more?" points when platform_feedback is on.
+     *  null/'' means no such line is rendered — a dead mailto is worse than
+     *  no offer. Longer feedback goes to a mailbox rather than into the town's
+     *  database on purpose; see components/PlatformFeedback.tsx. */
+    platform_feedback_email?: string | null;
     /* Per-pack research export switches: {pack_id: bool}. An absent key means
      * the pack's own server-side default (analytical packs on; sentiment and
      * moderation off). Enforced at row build on the server — this is display
@@ -337,6 +357,10 @@ export interface SystemSecret {
     key_value?: string;  // Only returned for some secrets (not sensitive ones)
     description: string | null;
     is_configured: boolean;
+    /** The deployment's host supplied this credential rather than the town.
+     *  The town can still save its own value over it, which takes the key off
+     *  the host's list. Absent/false on a standalone install. */
+    host_provided?: boolean;
 }
 
 // Statistics types
@@ -466,6 +490,23 @@ export interface AdvancedStatistics {
 
     // Cache info
     cached_at: string | null;
+}
+
+/** Aggregate answers to the platform-feedback question. Counts, never rows —
+ *  there are no individual records to show, by design.
+ *
+ *  No mean: the five options are ordered but not evenly spaced, so averaging
+ *  them would invent a measurement. `net_easier_percent` (share saying easier
+ *  minus share saying harder) is the honest single number.
+ *
+ *  `responses_by_month` uses the same "YYYY-MM" keys as
+ *  AdvancedStatistics.requests_by_month so it renders like the other trends. */
+export interface PlatformFeedbackStatistics {
+    total_responses: number;
+    counts: Record<string, number>;
+    percentages: Record<string, number>;
+    net_easier_percent: number;
+    responses_by_month: Record<string, number>;
 }
 
 // Auth types

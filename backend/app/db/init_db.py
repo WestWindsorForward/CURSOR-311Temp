@@ -188,6 +188,30 @@ async def _run_schema_migrations():
         "ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS public_archived BOOLEAN NOT NULL DEFAULT false",
         "CREATE INDEX IF NOT EXISTS ix_service_requests_public_archived ON service_requests (public_archived)",
         "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_archive_days INTEGER",
+        # Which credential keys the deployment's host supplied, rather than the
+        # town (added 2026-08-10). Key NAMES only; values live in the secret
+        # store and the encrypted system_secrets copy like any other credential.
+        # NULL reads as "none of them", so an install that has not migrated
+        # behaves as a town that owns all its own credentials -- which is the
+        # safe direction: a host push is refused rather than a town's key being
+        # overwritten by one.
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS host_provided_keys JSON",
+        # The operator answering the "Register your deployment" prompt for the
+        # whole deployment rather than for one browser (added 2026-08-17).
+        # False everywhere until somebody switches it on, so the per-browser
+        # dismissal keeps deciding exactly as it did.
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS registration_prompt_dismissed BOOLEAN NOT NULL DEFAULT false",
+        # Where longer platform feedback is emailed, when the optional
+        # platform_feedback module is on (added 2026-08-18). NULL means no
+        # address is configured, which renders no "tell us more" link at all
+        # -- so an install that has not migrated behaves as one that never
+        # made the offer, rather than pointing residents somewhere wrong.
+        "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS platform_feedback_email VARCHAR(255)",
+        # Photos the redactor could not clear, held back from every public
+        # surface until staff look at them (added 2026-08-12). NULL reads as
+        # "nothing waiting", which is the right answer for every report filed
+        # before this existed -- the old behaviour published those photos.
+        "ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS media_pending_review JSON",
         # GovTech integrations: comment/document sync tracking (added 2026-07-01)
         "ALTER TABLE request_comments ADD COLUMN IF NOT EXISTS external_ref VARCHAR(200)",
         "CREATE INDEX IF NOT EXISTS ix_request_comments_external_ref ON request_comments (external_ref)",
@@ -314,7 +338,14 @@ async def seed_database():
             # a card is switched in `capability_switches`, which starts empty --
             # a fresh install has answered nothing, and an empty map reads as
             # "not answered" rather than as "off".
-            modules={"unlisted_reports": False, "research_portal": False},
+            modules={
+                "unlisted_reports": False,
+                "research_portal": False,
+                # Optional platform-feedback question. Off, like the others:
+                # collecting anything from residents is a thing a town opts
+                # into, never a thing a fresh install starts doing.
+                "platform_feedback": False,
+            },
             capability_switches={},
         )
         db.add(settings_obj)

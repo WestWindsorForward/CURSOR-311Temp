@@ -60,7 +60,7 @@ def test_rotating_the_key_drops_the_path_as_well_as_the_key():
 
 
 def test_saving_a_kms_setting_clears_the_path(monkeypatch):
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from app.api import system
     from app.core import encryption
 
@@ -74,7 +74,7 @@ def test_saving_an_identity_setting_clears_the_discovery_document():
     """The OIDC discovery document is cached per issuer with no expiry. A town
     correcting a mistyped issuer, or a provider moving its endpoints, kept being
     sent to the old ones for the life of the process."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from app.api import system
     from app.services import identity
 
@@ -86,7 +86,7 @@ def test_saving_an_identity_setting_clears_the_discovery_document():
 def test_saving_something_unrelated_clears_nothing(monkeypatch):
     """Clearing everything on every save would refetch each capability's
     credentials on a page that saves several times."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from app.api import system
     from app.core import encryption
 
@@ -98,7 +98,7 @@ def test_saving_something_unrelated_clears_nothing(monkeypatch):
 def test_clearing_a_cache_never_fails_the_save(monkeypatch):
     """This runs inside the write. Failing to drop a cache must not lose the
     credential that was being saved."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi.routing")
     from app.api import system
     from app.core import encryption
 
@@ -119,6 +119,10 @@ def test_clearing_a_cache_never_fails_the_save(monkeypatch):
 
 def _config_source():
     import inspect
+
+    # Reading the source of a Celery task module still executes its imports,
+    # and app.tasks.service_requests builds the Celery app at import time.
+    pytest.importorskip("celery.app")
 
     from app.tasks import service_requests
 

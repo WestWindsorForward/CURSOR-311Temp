@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Float, Text, Boolean, Table, UniqueConstraint, event, select
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Float, Text, Boolean, Table, UniqueConstraint, CheckConstraint, Index, event, select
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.sql import func
@@ -250,6 +250,22 @@ class ServiceRequest(Base):
     # Metadata
     source = Column(String(50), default="resident_portal")  # resident_portal, phone, walk_in, email
     media_urls = Column(JSON, default=[])  # Array of up to 3 photo URLs/base64
+
+    # Photos the redactor could not clear, parked out of sight of every public
+    # surface: [{"media": <data URI>, "reason": "provider-error"|...}].
+    #
+    # Deliberately a separate column rather than a flag alongside media_urls.
+    # Every public path in the system -- the Open311 API, the map, the research
+    # export, a public-records response -- reads media_urls, and each of them is
+    # a place to forget a filter. A photo that is not in that column cannot be
+    # published by forgetting anything.
+    #
+    # Reached when the detector times out or errors: we do not know whether
+    # there is a face in the photo, so it is neither published nor thrown away.
+    # Staff look at it and release it into media_urls if it is fine. The report
+    # itself goes through either way -- a moderation outage must not cost a
+    # resident their pothole report.
+    media_pending_review = Column(JSON, default=[])
 
     # Public-feed visibility, chosen by the resident at submission.
     #   True  (default) - appears in the public feed/map and public list APIs
@@ -514,7 +530,20 @@ class SystemSettings(Base):
     #
     # `ai_analysis`, `sms_alerts` and `email_notifications` used to be here as
     # well, duplicating a decision the setup page also owned.
-    modules = Column(JSON, default={"unlisted_reports": False, "research_portal": False})
+    modules = Column(JSON, default={
+        "unlisted_reports": False,
+        "research_portal": False,
+        "platform_feedback": False,
+    })
+    # Where a resident is sent if they want to say more than the one-tap
+    # platform-feedback question allows: a plain `mailto:` target, rendered as a
+    # link and nothing else. See PlatformFeedback below for why longer feedback
+    # deliberately never reaches this database.
+    #
+    # NULL or blank means the offer is not rendered at all. A dead or wrong
+    # address is worse than no offer, so there is no default baked in here or
+    # anywhere else in the code -- every deployment types its own.
+    platform_feedback_email = Column(String(255))
     # Which integrations the town wants, independent of whether they are set up.
     #
     # The third fact about a capability, and the one that had nowhere to live:
@@ -598,11 +627,114 @@ class SystemSettings(Base):
     # Refreshed on demand (admin "Refresh models") and by a daily Celery task.
     ai_models_cache = Column(JSON, default={})
 
+    # Credential keys this instance's host supplied rather than the town, as a
+    # list of key names (never values). It is a record of ownership, and every
+    # rule about host-provided credentials reads it: the host may replace or
+    # withdraw what is on this list and nothing else, and a town admin typing
+    # their own value into the same box takes the key off it -- after which the
+    # host can no longer touch it. See app/services/host_secrets.py.
+    host_provided_keys = Column(JSON, default=[])
+
+    # The operator answering the "Register your deployment" prompt once, for the
+    # whole deployment. This is a different act from the per-browser dismissal
+    # in components/StayInformed.tsx: that is one person putting a nudge aside
+    # for themselves, which is why it lives in their localStorage. This says the
+    # question has been settled for the instance -- typically because it is a
+    # demo or a fleet member that registered elsewhere -- so the prompt stops
+    # appearing for everybody, in every browser.
+    #
+    # False on every existing install and on every new one: an operator has to
+    # say so, and until they do nothing changes.
+    registration_prompt_dismissed = Column(
+        Boolean, default=False, server_default='false', nullable=False
+    )
+
     # Last-seen status per proactive health check ({check_key: status}), so the
     # alerting task only emails admins when a check crosses into a worse state.
     health_alert_state = Column(JSON, default={})
 
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+#: The one question the platform-feedback module asks, and its only permitted
+#: answers, ordered best-to-worst. Ordinal, not numeric: "somewhat easier" is
+#: better than "no difference", but the gap between them is not a unit and
+#: nothing in this codebase averages them into one.
+#:
+#: Wording lives in the frontend (components/PlatformFeedback.tsx); these are
+#: the stored tokens, and they are stable identifiers -- rewording the question
+#: must not orphan the answers already collected.
+PLATFORM_FEEDBACK_ANSWERS = (
+    "much_easier",
+    "somewhat_easier",
+    "no_difference",
+    "somewhat_harder",
+    "much_harder",
+)
+
+
+class PlatformFeedback(Base):
+    """One anonymous answer to one multiple-choice question about Pinpoint.
+
+    WHAT IS STORED, AND WHY IT IS ONLY THIS
+    ---------------------------------------
+    Two columns: which of five ordered options was tapped, and when. That is
+    the whole record. There is deliberately no user id, no session id, no
+    cookie, no IP address (not even a hashed one), no user agent, no report id
+    and no free text -- so a row cannot be attributed to a person by anyone
+    holding the database, and the module needs no retention rule of its own
+    because there is nothing in it to retain.
+
+    NO FREE TEXT, ON PURPOSE
+    ------------------------
+    This is a municipal system. Anything a resident types is stored in the
+    town's own database and is therefore potentially responsive to a
+    public-records request, and it can contain the resident's own name, address
+    or phone number without anybody intending it to. That creates a scrubbing
+    obligation, a moderation obligation and a disclosure risk out of all
+    proportion to the value of the sentence.
+
+    So the resident who wants to say more is offered a `mailto:` link to the
+    address in `SystemSettings.platform_feedback_email` instead. The mail goes
+    to a mailbox, not to this table: there is nothing resident-typed to appear
+    in a records request, nothing to exclude from an export, and nothing to
+    moderate. This follows the precedent set by RESEARCH_PACKS_DEF in
+    api/research.py, where a deselected pack must never *generate* the data at
+    all, precisely so it cannot be asked for later.
+
+    WHERE THIS MAY NOT GO
+    ---------------------
+    Feedback about the platform is not part of a service request, so it is
+    structurally absent from the research export, the Open311 API, the
+    work-order/govtech payloads and every public map or tracker surface -- none
+    of which read this table. That absence is pinned by tests rather than left
+    to luck: see tests/test_platform_feedback.py and the NEVER set in
+    tests/test_work_order_payload.py. Aggregate sentiment about a vendor is not
+    something to ship to a vendor, and it is not research data a town agreed to
+    release.
+
+    Staff see aggregates. There are no individual records to show them.
+    """
+
+    __tablename__ = "platform_feedback"
+    __table_args__ = (
+        # The constraint, not just the enum in Python. A bad value has to be
+        # impossible in the column, or "constrained categorical" is a claim
+        # about the API layer rather than about the data.
+        CheckConstraint(
+            "platform_experience IN ('" + "', '".join(PLATFORM_FEEDBACK_ANSWERS) + "')",
+            name="ck_platform_feedback_answer",
+        ),
+        Index("ix_platform_feedback_submitted_at", "submitted_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Which of PLATFORM_FEEDBACK_ANSWERS was chosen.
+    platform_experience = Column(String(20), nullable=False)
+    # When. Nothing finer-grained is ever shown: staff see counts by month, so
+    # a timestamp cannot be used to line a row up against a report filed in the
+    # same second.
+    submitted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class DisclaimerAcknowledgment(Base):
@@ -1158,3 +1290,65 @@ class ClientErrorLog(Base):
 
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class ScreenedPhoto(Base):
+    """A photo already moderated and blurred, waiting for the report it belongs to.
+
+    Why this table exists
+    ---------------------
+    Screening runs against Google Vision, and Vision is a network round trip. It
+    used to happen inside the create-request POST, so a resident who attached a
+    photo pressed Submit and then watched a generic spinner for as long as the
+    upload and the annotate took -- on a phone, with a 6MB photo, long enough
+    that the form reads as broken and people press Submit again.
+
+    Nothing about that work needs to happen at submit time. The photo is chosen
+    minutes earlier, while the resident is still typing the description and
+    dragging the pin. So the portal uploads and screens it *then*, in the
+    background, and by the time Submit is pressed the answer is already known
+    and the POST carries a handle instead of six megabytes of base64.
+
+    What is stored
+    --------------
+    The REDACTED bytes, and only those. The blur is destructive and is applied
+    before this row is written, exactly as it is on the inline path -- see
+    image_redaction's module docstring for why there is deliberately no
+    unredacted original anywhere in the system. A photo that came back blocked
+    or unverifiable stores no bytes at all.
+
+    Lifetime
+    --------
+    Short. A handle is minted at photo-pick time and spent at submit time,
+    usually within a couple of minutes; `expires_at` gives it an hour, which is
+    a generous form-filling session. Rows are deleted when spent and reaped
+    hourly when they are not, because this table is resident-writable and every
+    row is a full-size image sitting in the database.
+    """
+
+    __tablename__ = "screened_photos"
+
+    id = Column(Integer, primary_key=True)
+
+    # The opaque handle the client holds. 32 random bytes, urlsafe-base64, so it
+    # cannot be guessed and cannot be walked -- possession of the token is the
+    # only authorisation, because the resident who uploaded the photo has no
+    # account to authenticate as.
+    token = Column(String(64), unique=True, nullable=False, index=True)
+
+    # ready | blocked | needs_review
+    #   ready         screened clean; `media` holds the redacted photo
+    #   blocked       SafeSearch says explicit; `media` is NULL and the resident
+    #                 was told at pick time that the photo cannot be used
+    #   needs_review  the screen could not be completed; `media` is NULL and the
+    #                 raw bytes were never persisted, so the client must resend
+    #                 them with the report and take the inline path
+    verdict = Column(String(20), nullable=False, default="ready")
+    reason = Column(String(64), default="")
+
+    media = Column(Text)                      # redacted data URI, or NULL
+    faces = Column(Integer, default=0, nullable=False)
+    plates = Column(Integer, default=0, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)

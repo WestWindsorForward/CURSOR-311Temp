@@ -260,13 +260,19 @@ def test_a_provider_error_cannot_inject_markup_into_the_email():
 
 
 def test_broken_and_at_risk_are_separate_headings():
-    """Filing "may stop working" under "not working" is the same class of lie
-    as a green tick on a revoked key."""
+    """Filing "failing intermittently" under "not working" is the same class of
+    lie as a green tick on a revoked key.
+
+    The at-risk heading used to read "May stop working", which predicted an
+    outcome the sweep has no basis for while telling the reader nothing to act
+    on. It states the observed condition now.
+    """
     plan = A.plan([FakeHealth("sms", "failing"), FakeHealth("identity", "down")], now=NOW)
     text = A.compose(plan, town="T", now=NOW)["text"]
     assert "Not working right now:" in text
-    assert "May stop working:" in text
-    assert text.index("Not working right now:") < text.index("May stop working:")
+    assert "Failing intermittently:" in text
+    assert "may stop" not in text.lower()
+    assert text.index("Not working right now:") < text.index("Failing intermittently:")
 
 
 # ---------------------------------------------------------------------------
@@ -620,16 +626,45 @@ def test_muting_cannot_be_forever():
     assert "0 <= days <= 90" in source
 
 
+def _mute_endpoint_source() -> str:
+    source = _system_api()
+    block = source[source.index("async def mute_connector_alerts"):]
+    return block[:block.index("\n@router") if "\n@router" in block else len(block)]
+
+
 def test_muting_an_unknown_connector_does_not_invent_one():
     """`connector` is an unvalidated path segment. Creating a row for whatever
     name it is given would let any admin request insert arbitrary junk into a
     table the setup page renders -- the same hole that was closed on the test
-    endpoint."""
-    source = _system_api()
-    block = source[source.index("async def mute_connector_alerts"):]
-    block = block[:block.index("\n@router") if "\n@router" in block else len(block)]
+    endpoint.
+
+    One row the endpoint *may* create: `health:<check>`, which carries the mute
+    for a proactive health check. Those checks are computed fresh every run and
+    have nothing to record against, so there is no pre-existing row to find.
+    That is the narrow exception, and it is only safe because of the allowlist
+    asserted here -- the prefix is a namespace, not a licence.
+    """
+    block = _mute_endpoint_source()
     assert "status_code=404" in block
-    assert "ConnectorHealth(" not in block, "the mute endpoint creates health rows"
+
+    if "ConnectorHealth(" not in block:
+        return
+    creates = block.index("ConnectorHealth(")
+    assert "CHECK_KEYS" in block, "the mute endpoint creates health rows with no allowlist"
+    assert block.index("CHECK_KEYS") < creates, \
+        "the mute endpoint creates a health row before checking the allowlist"
+    assert "not in CHECK_KEYS" in block
+
+
+def test_only_a_real_health_check_can_be_muted_into_existence():
+    """The allowlist is the whole defence, so it has to come from the module
+    that actually emits the checks. A list copied next to the route would drift
+    the moment a check is renamed, and drift here is either a dead mute button
+    or a name nobody validates."""
+    block = _mute_endpoint_source()
+    if "ConnectorHealth(" not in block:
+        return
+    assert "from app.services.proactive_health import CHECK_KEYS" in block
 
 
 def test_muting_changes_no_health_field():

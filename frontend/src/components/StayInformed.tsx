@@ -72,6 +72,26 @@ export const PRIVACY_POLICY_URL = 'https://pinpoint311.org/privacy';
 const MODAL_KEY = 'pinpoint311.stay-informed.dismissed';
 const BANNER_KEY = 'pinpoint311.stay-informed.banner-dismissed';
 
+/* There is now one piece of server-side state, and it answers a different
+ * question -- which is why it sits on top of the two flags above rather than
+ * replacing them.
+ *
+ * `registration_prompt_dismissed` on the public config payload is the OPERATOR
+ * speaking for the deployment: this instance has registered, or is a demo that
+ * never will, so stop asking anyone. A user clearing their localStorage cannot
+ * undo it and a fresh browser does not get a fresh prompt, because it was never
+ * that user's question to answer.
+ *
+ * The two above stay exactly as they are, and remain the whole story whenever
+ * this is false -- which it is on every deployment until an operator says
+ * otherwise. Nothing here changes what "dismissed in this browser" means; it
+ * only adds a case where nobody is asked in the first place.
+ *
+ * What it never suppresses is the way IN. `openStayInformed` still opens the
+ * form, from the banner or a setup-page button, so an operator who switched
+ * this on and then wanted to register has not been locked out of the form. Only
+ * the unprompted surfaces go quiet. */
+
 const OPEN_EVENT = 'pinpoint311:stay-informed:open';
 const CHANGE_EVENT = 'pinpoint311:stay-informed:change';
 
@@ -556,6 +576,13 @@ export function StayInformedHost({ ready, prefill }: { ready: boolean; prefill?:
      * Empty means it does not, and the modal shows the built-in form. */
     const [contactFormUrl, setContactFormUrl] = useState('');
     const [embedAllowed, setEmbedAllowed] = useState(true);
+    /* The operator's answer for the whole deployment, and whether we have heard
+     * it yet. Both are needed: the prompt opens by itself, so it must wait to
+     * be told rather than appear for a moment and then take itself away. A read
+     * that fails leaves this false, which is the prompt as it has always
+     * behaved. */
+    const [deploymentDismissed, setDeploymentDismissed] = useState(false);
+    const [configRead, setConfigRead] = useState(false);
     /* The two facts the deployment knows about itself rather than about the
      * person: where it answers, and which build it is. */
     const [deploymentUrl, setDeploymentUrl] = useState<string | null>(null);
@@ -574,8 +601,10 @@ export function StayInformedHost({ ready, prefill }: { ready: boolean; prefill?:
                 setEmbedAllowed(cfg?.contact_form_embed !== false);
                 setDeploymentUrl(cfg?.public_origin ?? null);
                 setVersion(cfg?.app_version ?? null);
+                setDeploymentDismissed(cfg?.registration_prompt_dismissed === true);
             })
-            .catch(() => { /* unknowable reads as unconfigured: the in-app form */ });
+            .catch(() => { /* unknowable reads as unconfigured: the in-app form */ })
+            .finally(() => setConfigRead(true));
     }, []);
 
     useEffect(() => {
@@ -599,12 +628,17 @@ export function StayInformedHost({ ready, prefill }: { ready: boolean; prefill?:
         // Once per page load at most, and never after any dismissal. Nobody
         // asked for this one, so it opens on the invitation rather than on a
         // form fetched from a third party.
-        if (ready && !dismissed && !autoPrompted.current) {
+        //
+        // `configRead` holds it until the deployment-wide answer has arrived,
+        // so an operator who switched the prompt off never sees it flash up and
+        // then vanish. Only the automatic prompt waits: a click on "Register
+        // your deployment" opens the dialog immediately, as before.
+        if (ready && !dismissed && configRead && !deploymentDismissed && !autoPrompted.current) {
             autoPrompted.current = true;
             setShowForm(false);
             setOpen(true);
         }
-    }, [ready, dismissed]);
+    }, [ready, dismissed, configRead, deploymentDismissed]);
 
     /* Built here rather than in the panel so the panel stays a rendering of
      * values it was handed. Empty embedUrl is what makes the panel offer a link
@@ -697,8 +731,14 @@ export function StayInformedHost({ ready, prefill }: { ready: boolean; prefill?:
 
             {/* Independent of the modal's flag: this is what "reachable
               * without blocking" means. It appears once the modal has been put
-              * aside and stays until it is dismissed in its own right. */}
-            {!bannerDismissed && dismissed && !open && ready && (
+              * aside and stays until it is dismissed in its own right.
+              *
+              * Except when the operator has answered for the deployment, which
+              * is not "put aside" but "settled" -- there is nothing left to
+              * come back to. The host itself stays mounted either way, so the
+              * OPEN_EVENT above still works and a button that says "Register
+              * your deployment" still opens the form. */}
+            {!bannerDismissed && dismissed && !open && ready && !deploymentDismissed && (
                 <StayInformedBanner onDismiss={() => { writeFlag(BANNER_KEY, 'dismissed'); setBannerDismissed(true); }} />
             )}
         </>

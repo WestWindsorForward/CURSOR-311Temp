@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
+import re
 
 
 # ============ Enums ============
@@ -325,6 +326,13 @@ class ServiceRequestDetailResponse(ServiceRequestResponse):
     email: str
     phone: Optional[str] = None
     media_urls: Optional[List[str]] = []  # Array of photo URLs
+    # Photos the redactor could not clear, awaiting a staff decision:
+    # [{"media": <data URI>, "reason": "provider-error"|...}].
+    #
+    # Only on the *detail* response, which is staff-only on every route that
+    # returns it. These are unredacted, which is exactly why they are held out
+    # of media_urls, so they must never reach a public schema.
+    media_pending_review: Optional[List[Dict[str, Any]]] = []
     ai_analysis: Optional[Dict[str, Any]] = None
     flag_reason: Optional[str] = None
     staff_notes: Optional[str] = None
@@ -387,7 +395,16 @@ class SystemSettingsBase(BaseModel):
     # which is the one switch for anything with a provider behind it -- they
     # were a second answer to a question the setup page also owned, and the two
     # could disagree. See app/services/capability_switches.py.
-    modules: Dict[str, bool] = {"unlisted_reports": False, "research_portal": False}
+    modules: Dict[str, bool] = {
+        "unlisted_reports": False,
+        "research_portal": False,
+        "platform_feedback": False,
+    }
+    # Where "want to tell us more?" points when the platform-feedback module is
+    # on. None or "" means the offer is simply not made -- see the column
+    # comment on SystemSettings.platform_feedback_email. Optional so a settings
+    # save that never mentions it cannot clear a configured address.
+    platform_feedback_email: Optional[str] = None
     # Per-pack research export switches: {pack_id: bool}. None/absent key means
     # the pack's own default (app/api/research.RESEARCH_PACKS_DEF). Optional so
     # exclude_unset keeps a settings save that never mentions packs from
@@ -401,6 +418,13 @@ class SystemSettingsBase(BaseModel):
     # everything stays listed. Optional so exclude_unset keeps a settings save
     # that never mentions it from clearing a configured policy.
     public_archive_days: Optional[int] = None
+    # Whether the operator has answered the "Register your deployment" prompt for
+    # the whole deployment, rather than each visitor answering it for their own
+    # browser. False is the only sane default: an instance that has never said
+    # so keeps the per-browser prompt it has always had. Saves that never
+    # mention it leave the stored value alone (exclude_unset in update_settings),
+    # so an older console cannot switch it back off by omission.
+    registration_prompt_dismissed: bool = False
 
     @field_validator('public_archive_days', mode='before')
     @classmethod
@@ -424,6 +448,28 @@ class SystemSettingsBase(BaseModel):
         if days > 36500:
             raise ValueError("Days must be 36,500 (100 years) or less.")
         return days
+
+    @field_validator('platform_feedback_email', mode='before')
+    @classmethod
+    def normalize_platform_feedback_email(cls, v):
+        """"" and None both mean "make no offer", and both store as NULL.
+
+        Validated rather than trusted because the value is interpolated into a
+        `mailto:` href on a public page. Anything that is not a plain address is
+        rejected here so it cannot become a link that goes somewhere else.
+        """
+        if v is None:
+            return None
+        v = str(v).strip()
+        if not v:
+            return None
+        if len(v) > 255:
+            raise ValueError("That address is too long.")
+        # One @, something either side, a dot in the domain, and no whitespace
+        # or characters that would let the value break out of the href.
+        if not re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", v):
+            raise ValueError("Enter a single plain email address, or leave it empty.")
+        return v
 
 
 class SystemSettingsResponse(SystemSettingsBase):
@@ -452,6 +498,11 @@ class SecretResponse(SecretBase):
     id: int
     is_configured: bool
     key_value: Optional[str] = None  # Only returned for non-sensitive configuration secrets
+    # Whether the deployment's host supplied this credential rather than the
+    # town. A note about who to ask, not a permission: the town can save its
+    # own value over it, and that takes the key off the host's list for good.
+    # False on a standalone install, where there is no host to provide one.
+    host_provided: bool = False
 
     class Config:
         from_attributes = True
@@ -586,6 +637,47 @@ class AdvancedStatisticsResponse(BaseModel):
     cached_at: Optional[datetime] = None
 
 
+# ============ Platform Feedback (optional module) ============
+
+class PlatformFeedbackCreate(BaseModel):
+    """The whole submission. One field, and it is a closed set.
+
+    A plain `str` validated against the tuple rather than a free string: the
+    column has a CHECK constraint behind this, and the two must agree.
+    """
+    platform_experience: str
+
+    @field_validator('platform_experience')
+    @classmethod
+    def must_be_one_of_the_five(cls, v):
+        from app.models import PLATFORM_FEEDBACK_ANSWERS
+
+        if v not in PLATFORM_FEEDBACK_ANSWERS:
+            raise ValueError("Not one of the answers this question offers.")
+        return v
+
+
+class PlatformFeedbackStatisticsResponse(BaseModel):
+    """The aggregate staff see. Counts, never rows.
+
+    Deliberately no mean. The five answers are ordered but not spaced: scoring
+    them 1..5 and averaging asserts that the step from "much harder" to
+    "somewhat harder" is the same size as the step from "no difference" to
+    "somewhat easier", which nobody measured. `net_easier_percent` is the
+    honest one-number summary -- the share who said easier minus the share who
+    said harder, which needs only the ordering to be meaningful.
+
+    `responses_by_month` uses the same "YYYY-MM" keys as
+    AdvancedStatistics.requests_by_month, so the trend renders like every other
+    trend on that page.
+    """
+    total_responses: int
+    # All five keys are always present, zeros included -- a distribution with a
+    # missing bar reads as a scale that never offered that option.
+    counts: Dict[str, int]
+    percentages: Dict[str, float]
+    net_easier_percent: float
+    responses_by_month: Dict[str, int]
 
 
 # ============ Map Layers ============

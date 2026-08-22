@@ -35,6 +35,10 @@ import pytest
 # guard misses.
 def _needs_alembic():
     pytest.importorskip("alembic.script")
+    # Reading the chain executes every revision file, and the road-geometry
+    # revision imports geoalchemy2 at module level -- so alembic being present
+    # is not on its own enough to load the versions directory.
+    pytest.importorskip("geoalchemy2.types")
 
 from app.db.migrate import (
     ADDITIVE,

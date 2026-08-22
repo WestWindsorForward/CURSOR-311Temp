@@ -127,6 +127,10 @@ def _rejecting():
 
 
 def _probe_png() -> bytes:
+    # The one-pixel probe lives in the API module next to the button that uses
+    # it, so getting hold of it drags in the web stack. The redaction logic
+    # under test does not need fastapi; only this fixture does.
+    pytest.importorskip("fastapi.routing")
     from app.api.system import _one_pixel_probe_image
     return _one_pixel_probe_image()
 
@@ -194,6 +198,7 @@ def test_the_test_button_asks_the_detector_rather_than_the_credential_store():
     make a real detection call, or it reports green on a lapsed subscription."""
     import inspect
 
+    pytest.importorskip("fastapi.routing")
     from app.api import system
 
     source = inspect.getsource(system._test_redaction)

@@ -70,6 +70,14 @@ INTERNAL = {
     "ai_models_cache",     # discovery cache, refreshed by the model picker
     "health_alert_state",  # what the alerting layer has already said
     "managed_policy",      # set by the hosting orchestrator, not the town
+    # Which credential keys the host supplied. Same reasoning as
+    # managed_policy: written only by the orchestrator (POST
+    # /provisioning/host-secrets) and by the write choke-point clearing a key a
+    # town has taken over, never by anybody filling in a form. It surfaces to
+    # the console read-only, as the `host_provided` note on the catalog and
+    # secrets responses, so there is nothing here for a settings form to round
+    # trip.
+    "host_provided_keys",
     "updated_at",          # the ORM writes it
 }
 

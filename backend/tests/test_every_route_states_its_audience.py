@@ -60,9 +60,21 @@ PUBLIC_WRITES = {
     # Resident-facing, by design.
     ("open311.py", "post", "/requests.json"),                        # file a report
     ("open311.py", "post", "/public/requests/{request_id}/comments"),  # comment on your own report
+    # Screens a photo when the resident picks it, so the Vision round trip is
+    # not sitting on the Submit button. Unauthenticated for the same reason
+    # /requests.json is: a resident has no account. It writes a row and spends
+    # money, so it is limited harder than filing a report (12/min against 10),
+    # size-capped before the bytes are read, stores only the REDACTED image, and
+    # the row is reaped within the hour whether or not anyone claims it.
+    ("open311.py", "post", "/photos/screen"),
     ("system.py", "post", "/disclaimer/acknowledge"),                # records a click
     ("system.py", "post", "/translate/batch"),                       # renders the page
     ("roads.py", "post", "/road-check"),                             # is this street closed
+    # One anonymous multiple-choice answer about the platform itself. Requiring
+    # a login to say the site is hard to use would exclude the people whose
+    # answer matters most. The handler refuses outright unless the town enabled
+    # the module, stores nothing about the caller, and is capped per day.
+    ("feedback.py", "post", "/platform"),                            # rate the platform
     # First-run and machine paths. Each checks a secret inside the handler,
     # which is why no Depends appears in the signature.
     ("auth.py", "post", "/bootstrap"),                               # bootstrap password
@@ -73,6 +85,7 @@ PUBLIC_WRITES = {
     ("provisioning.py", "post", "/lifecycle"),                       # provisioning token
     ("provisioning.py", "post", "/break-glass"),                     # signed break-glass token
     ("provisioning.py", "post", "/managed-settings"),                # provisioning token
+    ("provisioning.py", "post", "/host-secrets"),                    # provisioning token
 }
 
 

@@ -181,7 +181,17 @@ def test_modules_no_longer_carries_a_provider_backed_flag():
     from app.models import SystemSettings
 
     default = SystemSettings.__table__.c.modules.default.arg
-    assert set(default) == {"unlisted_reports", "research_portal"}, default
+    # The provider-free product features, and only those. `platform_feedback`
+    # joined the list in 2026-08: one anonymous question asked by the app
+    # itself, with no vendor, no credential and no card to configure.
+    assert set(default) == {
+        "unlisted_reports", "research_portal", "platform_feedback",
+    }, default
+    # The specific regression: none of the capability-backed switches may
+    # reappear here, whatever else the list grows.
+    assert not set(default) & {
+        "ai_analysis", "sms_alerts", "email_notifications", "translation",
+    }, default
 
 
 def test_the_legacy_flags_are_still_consulted_for_an_unanswered_capability():

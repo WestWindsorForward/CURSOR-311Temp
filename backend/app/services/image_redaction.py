@@ -83,6 +83,31 @@ MIN_BLUR_RADIUS = 6
 
 MAX_IMAGES = 3
 
+# The long edge of the copy sent to the detector.
+#
+# A phone photo is 3-8MB and 4000px wide, and on a resident's uplink the bytes
+# going *up* to Google dominate the wall clock -- the annotate itself is fast.
+# Vision does not detect better on 4000px than on 1600px for anything we act on
+# here (a face too small to find at 1600px is under ~25px and below
+# FACE_MIN_CONFIDENCE's useful range anyway), so the full-size upload buys
+# latency and nothing else.
+#
+# The blur is still applied to the FULL-SIZE original. Only the detector's copy
+# is small; the stored photo keeps its evidentiary resolution.
+SCREEN_MAX_EDGE = 1600
+
+# Boxes detected on the small copy are grown by this many *small-copy* pixels
+# before being applied to the original.
+#
+# Coordinates scale linearly, so the scale-up itself is exact -- but the numbers
+# either side of it are integers. Vision returns integer vertices on the copy,
+# and `to_pixels` truncates on the way back out, and both of those round the
+# wrong way roughly half the time. On a 4000px original each small-copy pixel is
+# 2.5 real ones, so a box that comes back one pixel short is a strip of jaw or
+# plate left legible. The error is bounded and small, and the cost of
+# over-covering is a slightly larger blur, so we always round outward.
+SCALE_SAFETY_PX = 1.5
+
 
 # --------------------------------------------------------------------------
 # geometry
@@ -130,6 +155,17 @@ class Box:
             self.kind,
             self.confidence,
         )
+
+    def grown(self, dx: float, dy: float) -> "Box":
+        """Grow by absolute fractions on every side, then clamp.
+
+        Unlike `padded`, the amount does not scale with the box. Used for the
+        rounding slack when a detection made on a downscaled copy is applied to
+        the original, where the error is a fixed number of pixels regardless of
+        how big the face was.
+        """
+        return Box(self.left - dx, self.top - dy, self.right + dx, self.bottom + dy,
+                   self.kind, self.confidence).clamped()
 
     def padded(self, ratio: float) -> "Box":
         """Grow by a fraction of the box's own size, then clamp."""
@@ -454,12 +490,72 @@ class RedactionResult:
         return self.faces + self.plates
 
 
+# Reasons that mean "we did not manage to look at this photo, or did not manage
+# to blur what we found". Anything in this set is withheld from the report
+# rather than published.
+#
+# This used to fail open: the original bytes were put straight into media_urls
+# and a `skipped` note was recorded, so a Vision timeout published an unblurred
+# face on a municipal website and nothing stopped to ask. The note went nowhere
+# a human reads. Failing open on the one axis the whole module exists to protect
+# is the wrong default -- a photo held back for staff review is recoverable in a
+# click, a face published under the town's name is not.
+#
+# Deliberately NOT in the set:
+#   not-inline-image  an http(s) URL we never fetched (SSRF) and never had the
+#                     bytes for; withholding it would break Open311 clients that
+#                     legitimately post hosted media.
+#   no-detections     we looked and found nobody. That is a result, not a
+#                     failure.
+#
+# `unreadable-image` IS in the set, and the reasoning that once kept it out is
+# worth writing down because it was wrong. It said: not a decodable image, so
+# there is no face in it to leak. That equates "Pillow cannot decode this" with
+# "nothing can decode this", and the two are very far apart. This image ships
+# Pillow 11 with no AVIF plugin and no HEIF opener registered, so an AVIF or
+# HEIC file -- a format every current browser renders and every recent iPhone
+# produces -- reads as (0, 0) here. It would never reach Vision, never be
+# SafeSearch'd, never be blurred, and keep its EXIF GPS block, and then be
+# published: an unmoderated, unredacted photo carrying the reporter's
+# coordinates, published *because* we could not read it.
+#
+# `image-too-large` is the same failure from the other direction: an image whose
+# pixel count we refuse to decode is one that nothing looked at.
+WITHHOLD_REASONS = frozenset({
+    "error", "provider-error", "no-detector", "blur-failed",
+    "unreadable-image", "image-too-large",
+})
+
+# Above this, we decline to decode at all.
+#
+# Pillow's own bomb guard only WARNS between 89.5M and 179M pixels, and a
+# convert("RGB") in that band allocates on the order of a gigabyte inside the
+# API worker -- from a 12MB upload, on an endpoint anyone can reach. The count
+# is read from the header (Image.open is lazy) before any pixel work happens.
+#
+# 50 megapixels is comfortably above anything a resident's camera produces -- a
+# 48MP iPhone photo is 8064x6048, about 49M -- and far below the band where
+# decoding costs more memory than the container has.
+MAX_DECODE_PIXELS = 50_000_000
+
+
 @dataclass
 class BatchResult:
     media: List[str] = field(default_factory=list)
     faces: int = 0
     plates: int = 0
     skipped: List[str] = field(default_factory=list)
+    # Photos that could not be verified as safe to publish, each as
+    # {"media": <data URI as received>, "reason": <why>}. The caller must keep
+    # these out of media_urls and park them for staff review.
+    withheld: List[Dict[str, str]] = field(default_factory=list)
+    # For each entry in `media`, its index in the list that was passed in.
+    #
+    # Once a photo can be withheld, `media` is no longer positionally aligned
+    # with the input, and a caller pairing them up by position silently moves a
+    # later photo into an earlier one's slot -- which on a report whose photos
+    # are a "before" and an "after" swaps their meaning.
+    kept: List[int] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -610,6 +706,115 @@ def image_size(raw: bytes) -> Tuple[int, int]:
             return image.size
     except Exception:
         return (0, 0)
+
+
+def readable_size(raw: bytes) -> Tuple[int, int, str]:
+    """(width, height, refusal-reason). Reads the header only; decodes nothing.
+
+    Splits the two failures the old `image_size() -> (0, 0)` collapsed together,
+    because they are not the same fact and only one of them was ever handled:
+
+      unreadable-image  Pillow could not open it. NOT "this is not an image" --
+                        this build has no AVIF plugin and no HEIF opener, so a
+                        photo straight off an iPhone lands here. See
+                        WITHHOLD_REASONS.
+      image-too-large   opens fine, and decoding it would allocate more memory
+                        than this endpoint is willing to spend. See
+                        MAX_DECODE_PIXELS.
+    """
+    width, height = image_size(raw)
+    if width <= 0 or height <= 0:
+        return (0, 0, "unreadable-image")
+    if width * height > MAX_DECODE_PIXELS:
+        return (width, height, "image-too-large")
+    return (width, height, "")
+
+
+def upright(raw: bytes, width: int, height: int) -> Tuple[bytes, int, int]:
+    """Bake the EXIF orientation tag into the pixels, or hand the bytes back.
+
+    Vision honours the orientation tag; `blur_regions` does not, because Pillow
+    applies it only if asked. So a portrait photo carrying Orientation=6 was
+    described by Vision in the rotated frame and blurred in the unrotated one --
+    the blur lands somewhere in the background and the face stays legible.
+
+    Rotating here means both halves see the same frame, and it costs nothing in
+    the common case: the EXIF block is stripped from everything we store anyway,
+    so there is no tag left afterwards to disagree about.
+    """
+    try:
+        import io
+
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(raw)) as image:
+            exif = image.getexif()
+            if not exif or exif.get(0x0112, 1) in (0, 1):
+                return raw, width, height
+            fixed = ImageOps.exif_transpose(image).convert("RGB")
+            out = io.BytesIO()
+            fixed.save(out, format="JPEG", quality=88, optimize=True)
+            return out.getvalue(), fixed.size[0], fixed.size[1]
+    except Exception:
+        logger.debug("[Redaction] orientation normalise failed", exc_info=True)
+        return raw, width, height
+
+
+def downscale(raw: bytes, max_edge: int = SCREEN_MAX_EDGE) -> Optional[Tuple[bytes, int, int]]:
+    """A smaller JPEG copy for the detector, with the size it came out at.
+
+    Returns None when the image is already within `max_edge`, or when it cannot
+    be re-encoded at all -- in both cases the caller sends the original bytes,
+    so a failure here costs latency and never correctness.
+
+    Quality 80 rather than the 88 used for storage: this copy is thrown away
+    after the annotate call, and JPEG artefacts at 80 do not move a face
+    detector. The saving is on the upload, which is the whole point.
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as image:
+            width, height = image.size
+            if max(width, height) <= max_edge:
+                return None
+            image = image.convert("RGB")
+            image.thumbnail((max_edge, max_edge), Image.LANCZOS)
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=80, optimize=True)
+            return out.getvalue(), image.size[0], image.size[1]
+    except Exception:
+        logger.debug("[Redaction] downscale failed; sending original", exc_info=True)
+        return None
+
+
+def probe_bytes(raw: bytes, width: int, height: int) -> Tuple[bytes, int, int]:
+    """(bytes to send the detector, and the dimensions its answer is in).
+
+    Always safe to call: an image already small enough, or one Pillow cannot
+    re-encode, comes back unchanged with its own dimensions.
+    """
+    small = downscale(raw)
+    if small is None:
+        return raw, width, height
+    return small
+
+
+def rescaled(boxes: Sequence[Box], probe_w: int, probe_h: int,
+             full_w: int, full_h: int) -> List[Box]:
+    """Carry detections made on the small copy back to the original.
+
+    `Box` is already in fractions of the image, so the scale-up is a no-op
+    arithmetically -- the same fraction names the same region at any resolution.
+    What is *not* free is the rounding at either end, so every box is grown by
+    SCALE_SAFETY_PX small-copy pixels. See that constant: an undersized blur box
+    leaks the face it was supposed to cover, an oversized one costs nothing.
+    """
+    if probe_w <= 0 or probe_h <= 0 or (probe_w >= full_w and probe_h >= full_h):
+        return [b.clamped() for b in boxes]
+    return [b.grown(SCALE_SAFETY_PX / probe_w, SCALE_SAFETY_PX / probe_h) for b in boxes]
 
 
 # --------------------------------------------------------------------------
@@ -791,7 +996,11 @@ async def _google_detect(raw: bytes, width: int, height: int,
     features = google_features(faces, plates)
     if not features:
         return []
-    return boxes_from_vision(await vision_annotate(raw, features), width, height, faces, plates)
+    # Vision looks at a downscaled copy; the caller blurs the original. See
+    # probe_bytes / rescaled.
+    probe, pw, ph = probe_bytes(raw, width, height)
+    found = boxes_from_vision(await vision_annotate(probe, features), pw, ph, faces, plates)
+    return rescaled(found, pw, ph, width, height)
 
 
 # ---- AWS Rekognition ------------------------------------------------------
@@ -1156,9 +1365,12 @@ async def redact_image(media: str, provider: str, faces: bool, plates: bool) -> 
         return RedactionResult(media, skipped_reason="not-inline-image")
     raw, mime = decoded
 
-    width, height = image_size(raw)
-    if width <= 0 or height <= 0:
-        return RedactionResult(media, skipped_reason="unreadable-image")
+    width, height, refusal = readable_size(raw)
+    if refusal:
+        # Nothing decoded it, so nothing looked at it -- both of these are
+        # withheld rather than published. See WITHHOLD_REASONS.
+        return RedactionResult(media, skipped_reason=refusal)
+    raw, width, height = upright(raw, width, height)
 
     provider, degraded_from = await effective_provider(provider)
     if degraded_from == provider:
@@ -1237,12 +1449,17 @@ async def redact_media(media: Optional[List[str]]) -> BatchResult:
     )
 
     out = BatchResult()
-    for original, result in zip(items, results):
+    for index, (original, result) in enumerate(zip(items, results)):
         if isinstance(result, Exception) or not isinstance(result, RedactionResult):
             logger.warning("[Redaction] image failed", exc_info=isinstance(result, Exception))
-            out.media.append(original)
             out.skipped.append("error")
+            out.withheld.append({"media": original, "reason": "error"})
             continue
+        if result.skipped_reason in WITHHOLD_REASONS:
+            out.skipped.append(result.skipped_reason)
+            out.withheld.append({"media": original, "reason": result.skipped_reason})
+            continue
+        out.kept.append(index)
         out.media.append(result.media)
         out.faces += result.faces
         out.plates += result.plates
@@ -1251,7 +1468,9 @@ async def redact_media(media: Optional[List[str]]) -> BatchResult:
 
     # Anything past MAX_IMAGES was never a candidate; carry it through unchanged
     # so this function cannot silently drop a photo.
-    out.media.extend(m for m in (media or [])[len(items):])
+    for offset, extra in enumerate((media or [])[len(items):]):
+        out.kept.append(len(items) + offset)
+        out.media.append(extra)
     return out
 
 
@@ -1270,12 +1489,22 @@ async def _google_screen_and_redact_one(media: str, faces: bool, plates: bool):
         return ModerationResult(), RedactionResult(media, skipped_reason="not-inline-image")
     raw, mime = decoded
 
-    width, height = image_size(raw)
-    if width <= 0 or height <= 0:
-        return ModerationResult(), RedactionResult(media, skipped_reason="unreadable-image")
+    width, height, refusal = readable_size(raw)
+    if refusal:
+        # Not decodable here, or too large to decode safely. Either way Vision
+        # never sees it and no verdict exists, so it must not be published --
+        # see WITHHOLD_REASONS for why this used to be, and must not be, a
+        # pass-through.
+        return ModerationResult(), RedactionResult(media, skipped_reason=refusal)
+    raw, width, height = upright(raw, width, height)
+
+    # SafeSearch, faces and text all come off the downscaled copy in one call.
+    # SafeSearch is a whole-image judgement and is if anything more reliable on
+    # the smaller copy; the detections are scaled back up before the blur.
+    probe, probe_w, probe_h = probe_bytes(raw, width, height)
 
     try:
-        payload = await vision_annotate(raw, google_features(faces, plates, safesearch=True))
+        payload = await vision_annotate(probe, google_features(faces, plates, safesearch=True))
     except Exception as exc:
         from app.core.sanitize import sanitize_for_log
         logger.info("[Redaction] vision unavailable: %s", sanitize_for_log(str(exc)))
@@ -1287,7 +1516,8 @@ async def _google_screen_and_redact_one(media: str, faces: bool, plates: bool):
         return ModerationResult(), RedactionResult(media, skipped_reason="provider-error")
 
     verdict = safesearch_from_payload(payload)
-    found = boxes_from_vision(payload, width, height, faces, plates)
+    found = rescaled(boxes_from_vision(payload, probe_w, probe_h, faces, plates),
+                     probe_w, probe_h, width, height)
 
     # An image about to be rejected as explicit is not worth blurring; the
     # caller raises before anything is stored.
@@ -1355,20 +1585,30 @@ async def screen_and_redact(media: Optional[List[str]]) -> Tuple[ModerationResul
     rank = {"none": 0, "mild": 1, "severe": 2}
     strongest = ModerationResult()
     out = BatchResult()
-    for original, result in zip(items, results):
+    for index, (original, result) in enumerate(zip(items, results)):
         if isinstance(result, Exception) or not isinstance(result, tuple):
             logger.warning("[Redaction] image failed", exc_info=isinstance(result, Exception))
-            out.media.append(original)
             out.skipped.append("error")
+            out.withheld.append({"media": original, "reason": "error"})
             continue
         verdict, redaction = result
         if rank[verdict.severity] > rank[strongest.severity]:
             strongest = verdict
+        if redaction.skipped_reason in WITHHOLD_REASONS:
+            # Vision never answered, so we do not know whether there is a face
+            # in here. Hold it back rather than publish it -- see
+            # WITHHOLD_REASONS.
+            out.skipped.append(redaction.skipped_reason)
+            out.withheld.append({"media": original, "reason": redaction.skipped_reason})
+            continue
+        out.kept.append(index)
         out.media.append(redaction.media)
         out.faces += redaction.faces
         out.plates += redaction.plates
         if not redaction.changed and redaction.skipped_reason not in ("", "no-detections", "blocked"):
             out.skipped.append(redaction.skipped_reason)
 
-    out.media.extend(m for m in (media or [])[len(items):])
+    for offset, extra in enumerate((media or [])[len(items):]):
+        out.kept.append(len(items) + offset)
+        out.media.append(extra)
     return strongest, out
